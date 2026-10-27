@@ -99,6 +99,12 @@ const (
 	// transient per-parse garbage is returned to the OS without paying a full
 	// GC + scavenge on every short idle tick.
 	nudgePollFreeOSInterval = 30 * time.Second
+
+	// nudgePollIntervalRefresh is how often a poller started without
+	// --interval re-reads [session] nudge_poll_interval, so a changed value
+	// reaches pollers that are already running instead of only new ones
+	// (g1-brru: 29 of 36 pollers kept the 2s they read at start).
+	nudgePollIntervalRefresh = time.Minute
 )
 
 // errNudgeSessionFenceMismatch is the contract's fence-mismatch cause, so every
@@ -1079,7 +1085,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintln(stderr, "gc nudge poll: session name unavailable") //nolint:errcheck
 		return 1
 	}
-	interval = resolveNudgePollInterval(target.cityPath, interval, intervalExplicit)
+	flagInterval := interval
+	interval = resolveNudgePollInterval(target.cityPath, flagInterval, intervalExplicit)
+	lastIntervalRead := time.Now()
 
 	release, err := acquireNudgePollerLease(target.cityPath, target.sessionName, target.pollerKey())
 	if err != nil {
@@ -1122,6 +1130,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if now := time.Now(); now.Sub(lastFreeOS) >= nudgePollFreeOSInterval {
 			debug.FreeOSMemory()
 			lastFreeOS = now
+		}
+		if now := time.Now(); !intervalExplicit && now.Sub(lastIntervalRead) >= nudgePollIntervalRefresh {
+			interval = resolveNudgePollInterval(target.cityPath, flagInterval, false)
+			lastIntervalRead = now
 		}
 
 		// Cheap gate, read before paying for the expensive observe/deliver
