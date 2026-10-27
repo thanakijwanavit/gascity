@@ -6155,6 +6155,38 @@ func TestSplitQueuedNudgesForDelivery_MailNudges(t *testing.T) {
 	}
 }
 
+// A poller started without --interval picks up a changed [session]
+// nudge_poll_interval once nudgePollIntervalRefresh has passed; an explicit
+// --interval is never re-read (g1-brru).
+func TestRefreshNudgePollInterval(t *testing.T) {
+	dir := t.TempDir()
+	writeCity := func(interval string) {
+		t.Helper()
+		toml := "[workspace]\nname = \"test\"\n[session]\nnudge_poll_interval = \"" + interval + "\"\n\n[[agent]]\nname = \"a\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatalf("write city.toml: %v", err)
+		}
+	}
+	writeCity("30s")
+	now := time.Now()
+	stale := now.Add(-nudgePollIntervalRefresh)
+
+	if got, at := refreshNudgePollInterval(dir, defaultNudgePollInterval, 2*time.Second, false, stale, now); got != 30*time.Second || !at.Equal(now) {
+		t.Fatalf("implicit, refresh due = %v at %v; want 30s read now", got, at)
+	}
+	recent := now.Add(-nudgePollIntervalRefresh / 2)
+	if got, at := refreshNudgePollInterval(dir, defaultNudgePollInterval, 2*time.Second, false, recent, now); got != 2*time.Second || !at.Equal(recent) {
+		t.Fatalf("implicit, refresh not due = %v at %v; want 2s unchanged", got, at)
+	}
+	if got, _ := refreshNudgePollInterval(dir, 7*time.Second, 7*time.Second, true, stale, now); got != 7*time.Second {
+		t.Fatalf("explicit --interval = %v; want 7s kept", got)
+	}
+	writeCity("45s")
+	if got, _ := refreshNudgePollInterval(dir, defaultNudgePollInterval, 30*time.Second, false, stale, now); got != 45*time.Second {
+		t.Fatalf("after config change = %v; want 45s", got)
+	}
+}
+
 func TestResolveNudgePollInterval(t *testing.T) {
 	writeCity := func(t *testing.T, sessionBlock string) string {
 		t.Helper()

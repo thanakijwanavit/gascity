@@ -916,6 +916,17 @@ func resolveNudgePollInterval(cityPath string, flagValue time.Duration, flagExpl
 	return flagValue
 }
 
+// refreshNudgePollInterval re-reads the interval of a poller started without
+// --interval once nudgePollIntervalRefresh has passed since lastRead, and
+// returns the interval to use with the time it was read. An explicit
+// --interval is never re-read.
+func refreshNudgePollInterval(cityPath string, flagValue, current time.Duration, flagExplicit bool, lastRead, now time.Time) (time.Duration, time.Time) {
+	if flagExplicit || now.Sub(lastRead) < nudgePollIntervalRefresh {
+		return current, lastRead
+	}
+	return resolveNudgePollInterval(cityPath, flagValue, false), now
+}
+
 func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, intervalExplicit bool, _ io.Writer, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
@@ -983,10 +994,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			debug.FreeOSMemory()
 			lastFreeOS = now
 		}
-		if now := time.Now(); !intervalExplicit && now.Sub(lastIntervalRead) >= nudgePollIntervalRefresh {
-			interval = resolveNudgePollInterval(target.cityPath, flagInterval, false)
-			lastIntervalRead = now
-		}
+		interval, lastIntervalRead = refreshNudgePollInterval(target.cityPath, flagInterval, interval, intervalExplicit, lastIntervalRead, time.Now())
 
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
