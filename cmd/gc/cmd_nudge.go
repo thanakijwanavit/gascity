@@ -99,6 +99,12 @@ const (
 	// transient per-parse garbage is returned to the OS without paying a full
 	// GC + scavenge on every short idle tick.
 	nudgePollFreeOSInterval = 30 * time.Second
+
+	// nudgePollIntervalRefresh is how often a poller started without
+	// --interval re-reads [session] nudge_poll_interval, so a changed value
+	// reaches pollers that are already running instead of only new ones
+	// (g1-brru: 29 of 36 pollers kept the 2s they read at start).
+	nudgePollIntervalRefresh = time.Minute
 )
 
 // errNudgeSessionFenceMismatch is the contract's fence-mismatch cause, so every
@@ -1055,6 +1061,17 @@ func resolveNudgePollInterval(cityPath string, flagValue time.Duration, flagExpl
 	return flagValue
 }
 
+// refreshNudgePollInterval re-reads the interval of a poller started without
+// --interval once nudgePollIntervalRefresh has passed since lastRead, and
+// returns the interval to use with the time it was read. An explicit
+// --interval is never re-read.
+func refreshNudgePollInterval(cityPath string, flagValue, current time.Duration, flagExplicit bool, lastRead, now time.Time) (time.Duration, time.Time) {
+	if flagExplicit || now.Sub(lastRead) < nudgePollIntervalRefresh {
+		return current, lastRead
+	}
+	return resolveNudgePollInterval(cityPath, flagValue, false), now
+}
+
 func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, intervalExplicit bool, _ io.Writer, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
@@ -1079,7 +1096,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintln(stderr, "gc nudge poll: session name unavailable") //nolint:errcheck
 		return 1
 	}
-	interval = resolveNudgePollInterval(target.cityPath, interval, intervalExplicit)
+	flagInterval := interval
+	interval = resolveNudgePollInterval(target.cityPath, flagInterval, intervalExplicit)
+	lastIntervalRead := time.Now()
 
 	release, err := acquireNudgePollerLease(target.cityPath, target.sessionName, target.pollerKey())
 	if err != nil {
@@ -1123,6 +1142,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			debug.FreeOSMemory()
 			lastFreeOS = now
 		}
+		interval, lastIntervalRead = refreshNudgePollInterval(target.cityPath, flagInterval, interval, intervalExplicit, lastIntervalRead, time.Now())
 
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
