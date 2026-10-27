@@ -254,7 +254,10 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 // find. declared comes from whoever built the argv; see redaction.go.
 func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	if changesAgentRegistry(args) {
+		// Before and after: a lookup that runs while herdr is still applying
+		// the change can store the old registry.
 		c.forgetAgents()
+		defer c.forgetAgents()
 	}
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
@@ -408,7 +411,8 @@ const agentGetMissTTL = 30 * time.Second
 
 // cachedAgents is listAgents shared across name lookups for agentListCacheTTL.
 // Failures are not cached. Calls that change the registry (agent start, pane
-// or tab close) drop the snapshot first, so a lookup after them is fresh.
+// or tab close) drop the snapshot before and after they run, so a lookup
+// after them is fresh.
 func (c *client) cachedAgents(ctx context.Context) ([]agentInfo, error) {
 	c.agentsMu.Lock()
 	if c.agents != nil && time.Since(c.agentsAt) < agentListCacheTTL {

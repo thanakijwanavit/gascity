@@ -102,3 +102,47 @@ func TestGetAgentMissExpires(t *testing.T) {
 		t.Fatalf("herdr calls = %v; want both asked again once the miss expired", got)
 	}
 }
+
+// A lookup that runs while `agent start` is still in herdr stores the
+// registry from before the start; the client drops it again once the start
+// returns, so the started agent is found at once.
+func TestGetAgentFindsAgentStartedDuringALookup(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "herdr")
+	reg := filepath.Join(dir, "registered")
+	inStart := filepath.Join(dir, "in-start")
+	script := "#!/bin/sh\nshift 2\n" +
+		"case \"$1 $2\" in\n" +
+		"  'agent get') echo '{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent target not found\"}}' ;;\n" +
+		"  'agent list') if [ -e " + reg + " ]; then echo '{\"result\":{\"agents\":[{\"agent\":\"claude\",\"name\":\"mayor\",\"pane_id\":\"w1:p1\",\"agent_status\":\"idle\"}]}}'; " +
+		"else echo '{\"result\":{\"agents\":[]}}'; fi ;;\n" +
+		"  'agent start') : > " + inStart + "; sleep 1; : > " + reg + "; echo '{\"result\":{}}' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &client{session: "gc-test", bin: bin}
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.run(ctx, "agent", "start", "mayor", "--kind", "claude", "--pane", "w1:p1")
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(inStart); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent start never ran")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok, err := c.getAgent(ctx, "mayor"); err != nil || ok {
+		t.Fatalf("getAgent during start = ok=%v, %v; want absent (not registered yet)", ok, err)
+	}
+	<-done
+	if _, ok, err := c.getAgent(ctx, "mayor"); err != nil || !ok {
+		t.Fatalf("getAgent after start = ok=%v, %v; want the started agent", ok, err)
+	}
+}
