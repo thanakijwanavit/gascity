@@ -39,6 +39,14 @@ type client struct {
 	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
+
+	// agentsMu guards the short-lived `agent list` snapshot getAgent's
+	// fallback shares (see cachedAgents) and the targets `agent get` recently
+	// answered agent_not_found for (see getAgent).
+	agentsMu sync.Mutex
+	agents   []agentInfo
+	agentsAt time.Time
+	getMiss  map[string]time.Time
 }
 
 func newClient(session, cityRoot string) *client {
@@ -245,6 +253,9 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 // runWithSecrets is run for an argv carrying a credential the grammar cannot
 // find. declared comes from whoever built the argv; see redaction.go.
 func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
+	if changesAgentRegistry(args) {
+		c.forgetAgents()
+	}
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
@@ -360,6 +371,84 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 		return nil, fmt.Errorf("herdr agent list: decode: %w", err)
 	}
 	return wrap.Agents, nil
+}
+
+// agentListCacheTTL bounds how long getAgent's fallback scans reuse one
+// `agent list` answer. One gc process asks about the same sessions several
+// times per pass (IsRunning, ObserveLiveness and resolveBinding each look the
+// name up), and every ask was a fresh herdr process: on G1 (herdr 0.9.3, 36
+// nudge pollers) these lookups were ~98% of all herdr requests (g1-brru).
+const agentListCacheTTL = time.Second
+
+// agentGetMissTTL is how long getAgent skips `agent get` for a target herdr
+// just answered agent_not_found for, and answers from the cached scan alone.
+// herdr 0.9.3 registers no agent names, so `agent get <name>` cannot succeed
+// there; versions that do resolve names re-check every agentGetMissTTL, and
+// at once after a registry change made through this client.
+const agentGetMissTTL = 30 * time.Second
+
+// cachedAgents is listAgents shared across name lookups for agentListCacheTTL.
+// Failures are not cached. Calls that change the registry (agent start, pane
+// or tab close) drop the snapshot first, so a lookup after them is fresh.
+func (c *client) cachedAgents(ctx context.Context) ([]agentInfo, error) {
+	c.agentsMu.Lock()
+	if c.agents != nil && time.Since(c.agentsAt) < agentListCacheTTL {
+		agents := c.agents
+		c.agentsMu.Unlock()
+		return agents, nil
+	}
+	c.agentsMu.Unlock()
+	agents, err := c.listAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if agents == nil {
+		agents = []agentInfo{}
+	}
+	c.agentsMu.Lock()
+	c.agents, c.agentsAt = agents, time.Now()
+	c.agentsMu.Unlock()
+	return agents, nil
+}
+
+// forgetAgents drops the cachedAgents snapshot and the remembered misses.
+func (c *client) forgetAgents() {
+	c.agentsMu.Lock()
+	c.agents = nil
+	c.getMiss = nil
+	c.agentsMu.Unlock()
+}
+
+// recentGetMiss reports whether `agent get target` answered agent_not_found
+// within agentGetMissTTL.
+func (c *client) recentGetMiss(target string) bool {
+	c.agentsMu.Lock()
+	defer c.agentsMu.Unlock()
+	at, ok := c.getMiss[target]
+	return ok && time.Since(at) < agentGetMissTTL
+}
+
+// noteGetMiss records that `agent get target` answered agent_not_found.
+func (c *client) noteGetMiss(target string) {
+	c.agentsMu.Lock()
+	if c.getMiss == nil {
+		c.getMiss = make(map[string]time.Time)
+	}
+	c.getMiss[target] = time.Now()
+	c.agentsMu.Unlock()
+}
+
+// changesAgentRegistry reports whether a herdr argv can add, remove or move a
+// registered agent, which makes a cached `agent list` stale.
+func changesAgentRegistry(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	switch args[0] + " " + args[1] {
+	case "agent start", "pane close", "tab close":
+		return true
+	}
+	return false
 }
 
 // paneRead → `herdr pane read <paneID> --source <source> [--lines n]`
@@ -717,22 +806,29 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 // get <target>` only resolves a pane id — passing an agent name returns
 // agent_not_found even though `agent list` lists that same agent under that
 // name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// back to a listAgents scan, which does resolve by name. Measured again on
+// herdr 0.9.3 (G1, 26 Oct 2026): every `agent get <name>` failed, ~41/s on one
+// server (g1-brru). So after a not-found answer the target skips `agent get`
+// for agentGetMissTTL, and the scan reuses one cachedAgents answer per
+// agentListCacheTTL.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
-	res, err := c.run(ctx, "agent", "get", target)
-	if err == nil {
-		var wrap struct {
-			Agent agentInfo `json:"agent"`
+	if !c.recentGetMiss(target) {
+		res, err := c.run(ctx, "agent", "get", target)
+		if err == nil {
+			var wrap struct {
+				Agent agentInfo `json:"agent"`
+			}
+			if err := json.Unmarshal(res, &wrap); err != nil {
+				return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+			}
+			return wrap.Agent, true, nil
 		}
-		if err := json.Unmarshal(res, &wrap); err != nil {
-			return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+		if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
+			return agentInfo{}, false, err
 		}
-		return wrap.Agent, true, nil
+		c.noteGetMiss(target)
 	}
-	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
-		return agentInfo{}, false, err
-	}
-	agents, lerr := c.listAgents(ctx)
+	agents, lerr := c.cachedAgents(ctx)
 	if lerr != nil {
 		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
