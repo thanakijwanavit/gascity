@@ -114,7 +114,7 @@ func TestGetAgentFindsAgentStartedDuringALookup(t *testing.T) {
 	script := "#!/bin/sh\nshift 2\n" +
 		"case \"$1 $2\" in\n" +
 		"  'agent get') echo '{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent target not found\"}}' ;;\n" +
-		"  'agent list') if [ -e " + reg + " ]; then echo '{\"result\":{\"agents\":[{\"agent\":\"claude\",\"name\":\"mayor\",\"pane_id\":\"w1:p1\",\"agent_status\":\"idle\"}]}}'; " +
+		"  'agent list') if [ -e " + reg + " ]; then echo '{\"result\":{\"agents\":[{\"agent\":\"mayor\",\"pane_id\":\"w1:p1\",\"agent_status\":\"idle\"}]}}'; " +
 		"else echo '{\"result\":{\"agents\":[]}}'; fi ;;\n" +
 		"  'agent start') : > " + inStart + "; sleep 1; : > " + reg + "; echo '{\"result\":{}}' ;;\n" +
 		"esac\n"
