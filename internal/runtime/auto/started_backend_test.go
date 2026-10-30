@@ -567,3 +567,84 @@ func TestStopClosesTheLaunchingBackendsLeftoverAfterProviderChange(t *testing.T)
 		t.Fatalf("routed ACP backend Stop called %d times for a session it never held, want 0", n)
 	}
 }
+
+// A launch record on one backend that names the other backend (a copied
+// sidecar) is not that backend's own launch: the backend whose record names
+// the session still owns it.
+func TestLaunchRecordNamingAnotherBackendIsNotThisBackendsLaunch(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	startBeforeLaunchRecord(t, defaultSP, "agent")
+	acpSP := runtime.NewFake()
+	if err := acpSP.SetMeta("agent", startedBackendKey, "default"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := acpSP.SetMeta("agent", "GC_SESSION_NAME", "agent"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	if err := p.Stop("agent"); err != nil {
+		t.Fatalf("Stop = %v, want nil: only the default backend's record is its own", err)
+	}
+	if defaultSP.IsRunning("agent") {
+		t.Fatal("default runtime should be stopped")
+	}
+}
+
+// A confirmed stop clears the unconfirmed state: the same refusal reported
+// again later is a new report, not a repeat.
+func TestConfirmedStopClearsTheUnconfirmedStopState(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	if err := defaultSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+	first := p.Stop("agent")
+	if !errors.Is(first, runtime.ErrStopUnconfirmed) {
+		t.Fatalf("first Stop = %v, want an unconfirmed stop", first)
+	}
+	if err := defaultSP.SetMeta("agent", "GC_SESSION_NAME", "agent"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := p.Stop("agent"); err != nil {
+		t.Fatalf("Stop = %v, want a confirmed stop", err)
+	}
+
+	// Same state as the first refusal again.
+	if err := defaultSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	if err := defaultSP.RemoveMeta("agent", "GC_SESSION_NAME"); err != nil {
+		t.Fatalf("RemoveMeta: %v", err)
+	}
+	p.RouteACP("agent")
+	again := p.Stop("agent")
+	if again == nil || again.Error() != first.Error() {
+		t.Fatalf("Stop = %v, want the same refusal as %v", again, first)
+	}
+	if runtime.IsRepeatedStopUnconfirmed(again) {
+		t.Fatal("refusal after a confirmed stop was flagged as a repeat")
+	}
+}
+
+// Both backends run a same-named session: the routed backend's answer wins,
+// as before this fix.
+func TestProcessAlivePrefersTheRoutedBackendWhenItRunsTheSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	for _, sp := range []*runtime.Fake{defaultSP, acpSP} {
+		if err := sp.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+	defaultSP.Zombies["agent"] = true
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	if !p.ProcessAlive("agent", []string{"claude"}) {
+		t.Fatal("ProcessAlive = false, want the routed ACP backend's answer (alive)")
+	}
+}
