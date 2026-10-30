@@ -8,10 +8,31 @@ package auto
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// StartedBackendMetaKey names the runtime metadata entry Start writes on the
+// backend that launched a session: "default" or "acp". Stop reads it to find
+// the backend that owns a live runtime after the session's configured
+// transport changed (for example claude on herdr -> codex on acp).
+const StartedBackendMetaKey = "GC_RUNTIME_BACKEND"
+
+const (
+	defaultLabel = "default"
+	acpLabel     = "acp"
+)
+
+// Default bounds for confirming a stop on the backend that started the
+// runtime. A backend may answer liveness from a short-lived cache (herdr
+// reuses its agent list for up to a second), so one probe right after the
+// stop can still see the runtime.
+const (
+	defaultStopConfirmTimeout = 3 * time.Second
+	defaultStopConfirmPoll    = 200 * time.Millisecond
 )
 
 // Provider routes session operations to a default or ACP backend
@@ -22,6 +43,12 @@ type Provider struct {
 
 	mu     sync.RWMutex
 	routes map[string]bool // true = ACP
+	// unconfirmed holds, per session, the last unconfirmed-stop reason, so a
+	// stop retried every tick in the same state is flagged as a repeat.
+	unconfirmed map[string]string
+
+	stopConfirmTimeout time.Duration
+	stopConfirmPoll    time.Duration
 }
 
 var (
@@ -43,9 +70,12 @@ var (
 // registered as ACP. acpSP handles sessions registered via RouteACP.
 func New(defaultSP, acpSP runtime.Provider) *Provider {
 	return &Provider{
-		defaultSP: defaultSP,
-		acpSP:     acpSP,
-		routes:    make(map[string]bool),
+		defaultSP:          defaultSP,
+		acpSP:              acpSP,
+		routes:             make(map[string]bool),
+		unconfirmed:        make(map[string]string),
+		stopConfirmTimeout: defaultStopConfirmTimeout,
+		stopConfirmPoll:    defaultStopConfirmPoll,
 	}
 }
 
@@ -75,6 +105,17 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.defaultSP
 }
 
+// backends returns the routed backend and the other one, with their labels.
+func (p *Provider) backends(name string) (primary runtime.Provider, primaryLabel string, other runtime.Provider, otherLabel string) {
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	if isACP {
+		return p.acpSP, acpLabel, p.defaultSP, defaultLabel
+	}
+	return p.defaultSP, defaultLabel, p.acpSP, acpLabel
+}
+
 // SupportsTransport reports whether this provider can route the requested
 // session transport.
 func (p *Provider) SupportsTransport(transport string) bool {
@@ -99,35 +140,51 @@ func (p *Provider) DetectTransport(name string) string {
 	return ""
 }
 
-// Start delegates to the routed backend.
+// Start delegates to the routed backend and, once the runtime is up, records
+// on that backend which backend launched it (StartedBackendMetaKey), so Stop
+// still finds the runtime after the session's configured transport changes.
+// The record is best-effort: Stop falls back to the backend's own launch
+// metadata when it is missing.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	return p.route(name).Start(ctx, name, cfg)
+	sp, label, _, _ := p.backends(name)
+	if err := sp.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	_ = sp.SetMeta(name, StartedBackendMetaKey, label)
+	p.forgetUnconfirmedStop(name)
+	return nil
 }
 
 // Stop delegates to the routed backend and cleans up the route entry
 // only on success. If the routed backend fails, tries the other backend
 // to handle stale/missing route entries (e.g., after controller restart).
+//
+// When the routed backend holds neither the runtime nor a launch record for
+// the session, while the other backend runs it and its launch record names
+// the session, the configured transport changed after launch (claude on
+// herdr -> codex on acp): the runtime is stopped on the backend that started
+// it, and the stop counts only once that backend no longer reports it.
 func (p *Provider) Stop(name string) error {
-	primary := p.route(name)
-	primaryLabel := "default"
-	otherLabel := "acp"
+	primary, primaryLabel, other, otherLabel := p.backends(name)
 	primaryRunning := primary.IsRunning(name)
+	if !primaryRunning && launchedOnOtherBackend(name, primary, primaryLabel, other, otherLabel) {
+		return p.stopOnStartingBackend(other, otherLabel, name)
+	}
 	p.mu.RLock()
 	primaryExplicitRoute := p.routes[name]
 	p.mu.RUnlock()
 	err := primary.Stop(name)
 	if err == nil && primaryRunning {
-		p.Unroute(name)
+		p.stopped(name)
 		return nil
 	}
 	// Fall through to the other backend in case the route is stale.
-	var other runtime.Provider
 	p.mu.RLock()
 	if p.routes[name] {
-		primaryLabel = "acp"
-		otherLabel = "default"
+		primaryLabel, otherLabel = acpLabel, defaultLabel
 		other = p.defaultSP
 	} else {
+		primaryLabel, otherLabel = defaultLabel, acpLabel
 		other = p.acpSP
 	}
 	p.mu.RUnlock()
@@ -135,9 +192,13 @@ func (p *Provider) Stop(name string) error {
 	if err == nil {
 		if primaryExplicitRoute {
 			if otherRunning {
-				return fmt.Errorf("%s backend: stop succeeded without liveness confirmation while %s backend still reports the session running", primaryLabel, otherLabel)
+				return p.unconfirmedStop(name, fmt.Sprintf(
+					"%s backend: stop succeeded without liveness confirmation while %s backend still reports the session running (launch records: %s=%s, %s=%s)",
+					primaryLabel, otherLabel,
+					primaryLabel, describeLaunchRecord(primary, primaryLabel, name),
+					otherLabel, describeLaunchRecord(other, otherLabel, name)))
 			}
-			p.Unroute(name)
+			p.stopped(name)
 			return nil
 		}
 		err = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
@@ -155,10 +216,113 @@ func (p *Provider) Stop(name string) error {
 		runtime.BackendError{Label: otherLabel, Err: otherErr},
 	)
 	if mergedErr == nil {
-		p.Unroute(name)
+		p.stopped(name)
 		return nil
 	}
 	return mergedErr
+}
+
+// launchedOnOtherBackend reports whether other, not the routed primary,
+// launched name's live runtime: other runs it and its launch record names the
+// session, while primary holds neither the runtime nor a launch record for
+// it. A metadata read error leaves ownership unknown (false), so Stop keeps
+// its refusal to touch a same-named runtime it cannot attribute.
+func launchedOnOtherBackend(name string, primary runtime.Provider, primaryLabel string, other runtime.Provider, otherLabel string) bool {
+	if !other.IsRunning(name) {
+		return false
+	}
+	if launched, err := launchRecorded(other, otherLabel, name); err != nil || !launched {
+		return false
+	}
+	launched, err := launchRecorded(primary, primaryLabel, name)
+	return err == nil && !launched
+}
+
+// launchRecorded reports whether sp's runtime metadata records launching
+// name: Start's record names sp, or, for runtimes started before that record
+// existed, sp's own launch metadata (seeded from the start env) carries the
+// session name.
+func launchRecorded(sp runtime.Provider, label, name string) (bool, error) {
+	backend, err := sp.GetMeta(name, StartedBackendMetaKey)
+	if err != nil {
+		return false, err
+	}
+	if backend = strings.TrimSpace(backend); backend != "" {
+		return backend == label, nil
+	}
+	sessionName, err := sp.GetMeta(name, "GC_SESSION_NAME")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(sessionName) == name, nil
+}
+
+// describeLaunchRecord renders sp's launch record for name in an unconfirmed
+// stop reason. It never echoes a backend error: some read like "not found",
+// which runtime.IsSessionGone would take for a stopped session.
+func describeLaunchRecord(sp runtime.Provider, label, name string) string {
+	launched, err := launchRecorded(sp, label, name)
+	switch {
+	case err != nil:
+		return "unreadable"
+	case launched:
+		return "yes"
+	default:
+		return "none"
+	}
+}
+
+// stopOnStartingBackend stops name on the backend that launched it and
+// reports success only once that backend no longer reports the runtime.
+func (p *Provider) stopOnStartingBackend(sp runtime.Provider, label, name string) error {
+	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+		return fmt.Errorf("%s backend: %w", label, err)
+	}
+	if !p.waitStopped(sp, name) {
+		return p.unconfirmedStop(name, fmt.Sprintf(
+			"%s backend: stop returned but the runtime it started is still running (the configured backend holds no launch record)", label))
+	}
+	p.stopped(name)
+	return nil
+}
+
+// waitStopped polls sp until it no longer reports name running, for at most
+// stopConfirmTimeout.
+func (p *Provider) waitStopped(sp runtime.Provider, name string) bool {
+	deadline := time.Now().Add(p.stopConfirmTimeout)
+	for {
+		if !sp.IsRunning(name) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(p.stopConfirmPoll)
+	}
+}
+
+// stopped records a confirmed stop: the route entry and any earlier
+// unconfirmed-stop state for name are dropped.
+func (p *Provider) stopped(name string) {
+	p.Unroute(name)
+	p.forgetUnconfirmedStop(name)
+}
+
+// unconfirmedStop returns the error for a stop that could not be confirmed,
+// flagged Repeat when the same reason was already reported for name, so a
+// caller retrying every tick logs it once per state change.
+func (p *Provider) unconfirmedStop(name, reason string) error {
+	p.mu.Lock()
+	repeat := p.unconfirmed[name] == reason
+	p.unconfirmed[name] = reason
+	p.mu.Unlock()
+	return &runtime.StopUnconfirmedError{Name: name, Reason: reason, Repeat: repeat}
+}
+
+func (p *Provider) forgetUnconfirmedStop(name string) {
+	p.mu.Lock()
+	delete(p.unconfirmed, name)
+	p.mu.Unlock()
 }
 
 // Interrupt delegates to the routed backend.
@@ -222,9 +386,17 @@ func (p *Provider) Attach(name string) error {
 	return p.defaultSP.Attach(name)
 }
 
-// ProcessAlive delegates to the routed backend.
+// ProcessAlive asks the backend that runs the session: the routed one, or,
+// like IsRunning, the other one when the routed backend does not run it
+// (stale route, or a provider change since launch). Otherwise a live runtime
+// would read as running with a dead agent just because config now names
+// another backend.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
-	return p.route(name).ProcessAlive(name, processNames)
+	primary, _, other, _ := p.backends(name)
+	if !primary.IsRunning(name) && other.IsRunning(name) {
+		return other.ProcessAlive(name, processNames)
+	}
+	return primary.ProcessAlive(name, processNames)
 }
 
 // ObserveLiveness delegates to the routed backend through runtime.ObserveLiveness
@@ -328,10 +500,16 @@ func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow ti
 // supports one, so the reconciler's RelaunchProvider type-assert is not masked
 // by the auto router.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if rp, ok := p.route(name).(runtime.RelaunchProvider); ok {
-		return rp.Relaunch(ctx, name, cfg)
+	sp, label, _, _ := p.backends(name)
+	rp, ok := sp.(runtime.RelaunchProvider)
+	if !ok {
+		return runtime.ErrRelaunchUnsupported
 	}
-	return runtime.ErrRelaunchUnsupported
+	if err := rp.Relaunch(ctx, name, cfg); err != nil {
+		return err
+	}
+	_ = sp.SetMeta(name, StartedBackendMetaKey, label)
+	return nil
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

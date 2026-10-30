@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -209,11 +210,18 @@ func TestStopOnStartingBackendIsConfirmedByLiveness(t *testing.T) {
 	startBeforeLaunchRecord(t, defaultSP, "agent")
 	defaultSP.StopLeavesRunning["agent"] = true
 	p := New(defaultSP, acpSP)
+	p.stopConfirmTimeout, p.stopConfirmPoll = 30*time.Millisecond, 5*time.Millisecond
 	p.RouteACP("agent")
 
 	err := p.Stop("agent")
 	if err == nil {
 		t.Fatal("Stop = nil, want an error: the starting backend still reports the runtime")
+	}
+	if !errors.Is(err, runtime.ErrStopUnconfirmed) {
+		t.Fatalf("Stop error = %v, want runtime.ErrStopUnconfirmed", err)
+	}
+	if n := countCalls(defaultSP, "IsRunning", "agent"); n < 3 {
+		t.Fatalf("starting backend liveness probed %d times, want polling until the confirm window ends", n)
 	}
 	if runtime.IsSessionGone(err) {
 		t.Fatalf("Stop error %q reads as session-gone", err)
@@ -282,4 +290,115 @@ func TestProcessAliveReachesTheStartingBackendAfterProviderChange(t *testing.T) 
 	if p.ProcessAlive("agent", []string{"claude"}) {
 		t.Fatal("ProcessAlive = true for a zombie on the starting backend")
 	}
+}
+
+// A stop retried every tick in an unchanged state is flagged Repeat so the
+// worker event and the reconciler log fire once per state change; a changed
+// state, or a confirmed stop, starts over.
+func TestUnconfirmedStopIsFlaggedRepeatUntilTheStateChanges(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	if err := defaultSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	first := p.Stop("agent")
+	if !errors.Is(first, runtime.ErrStopUnconfirmed) || runtime.IsRepeatedStopUnconfirmed(first) {
+		t.Fatalf("first Stop = %v, want a new unconfirmed stop", first)
+	}
+	second := p.Stop("agent")
+	if !runtime.IsRepeatedStopUnconfirmed(second) {
+		t.Fatalf("second Stop = %v, want it flagged as a repeat", second)
+	}
+	if second.Error() != first.Error() {
+		t.Fatalf("repeat reason %q differs from %q", second, first)
+	}
+
+	// The ACP backend now holds a launch record: a different state.
+	if err := acpSP.SetMeta("agent", "GC_SESSION_NAME", "agent"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	changed := p.Stop("agent")
+	if !errors.Is(changed, runtime.ErrStopUnconfirmed) || runtime.IsRepeatedStopUnconfirmed(changed) {
+		t.Fatalf("Stop after a state change = %v, want a new unconfirmed stop", changed)
+	}
+	if !strings.Contains(changed.Error(), "acp=yes") {
+		t.Fatalf("Stop reason = %q, want the ACP launch record in it", changed)
+	}
+	if err := acpSP.RemoveMeta("agent", "GC_SESSION_NAME"); err != nil {
+		t.Fatalf("RemoveMeta: %v", err)
+	}
+
+	// The default backend's launch metadata now names the session: confirmed.
+	if err := defaultSP.SetMeta("agent", "GC_SESSION_NAME", "agent"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := p.Stop("agent"); err != nil {
+		t.Fatalf("Stop = %v, want nil once the default backend's launch record names the session", err)
+	}
+
+	// A confirmed stop clears the state: the next refusal is new again.
+	if err := defaultSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	if err := defaultSP.RemoveMeta("agent", "GC_SESSION_NAME"); err != nil {
+		t.Fatalf("RemoveMeta: %v", err)
+	}
+	p.RouteACP("agent")
+	again := p.Stop("agent")
+	if !errors.Is(again, runtime.ErrStopUnconfirmed) || runtime.IsRepeatedStopUnconfirmed(again) {
+		t.Fatalf("Stop after a confirmed stop = %v, want a new unconfirmed stop", again)
+	}
+}
+
+// A metadata read failure on either backend leaves ownership unknown: no
+// cross-backend stop, and the reason says the record was unreadable.
+func TestStopWithUnreadableLaunchRecordRefuses(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	startBeforeLaunchRecord(t, defaultSP, "agent")
+	acpSP := &metaErrorProvider{Fake: runtime.NewFake()}
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	err := p.Stop("agent")
+	if !errors.Is(err, runtime.ErrStopUnconfirmed) {
+		t.Fatalf("Stop = %v, want an unconfirmed stop while the ACP record is unreadable", err)
+	}
+	if !strings.Contains(err.Error(), "acp=unreadable") {
+		t.Fatalf("Stop reason = %q, want acp=unreadable", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("Stop reason %q echoes the backend error", err)
+	}
+	if !defaultSP.IsRunning("agent") {
+		t.Fatal("default runtime must stay running while ownership is unknown")
+	}
+}
+
+// Start on a backend that cannot store metadata still starts the session.
+func TestStartSucceedsWhenTheLaunchRecordCannotBeWritten(t *testing.T) {
+	defaultSP := &metaErrorProvider{Fake: runtime.NewFake()}
+	p := New(defaultSP, runtime.NewFake())
+	if err := p.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start = %v, want nil: the launch record is best-effort", err)
+	}
+	if !defaultSP.IsRunning("agent") {
+		t.Fatal("session should be running")
+	}
+}
+
+// metaErrorProvider fails every metadata call with an error whose text would
+// read as session-gone if it were echoed into a stop error.
+type metaErrorProvider struct {
+	*runtime.Fake
+}
+
+func (p *metaErrorProvider) GetMeta(string, string) (string, error) {
+	return "", errors.New("meta store: key not found on unreadable volume")
+}
+
+func (p *metaErrorProvider) SetMeta(string, string, string) error {
+	return errors.New("meta store unavailable")
 }

@@ -138,3 +138,37 @@ func MergeBackendStopErrors(results ...BackendError) error {
 	}
 	return errors.Join(failures...)
 }
+
+// ErrStopUnconfirmed reports that a composite provider could not confirm a
+// stop: it cannot tell which backend owns the session's runtime, or the
+// owning backend still reports the runtime after stopping it. The runtime may
+// still be alive, so callers must not treat the session as stopped.
+var ErrStopUnconfirmed = errors.New("stop not confirmed")
+
+// StopUnconfirmedError carries the backend state behind an unconfirmed stop.
+// Repeat is true when the provider already reported this same state for the
+// same session, so callers retrying every tick can log it once per state
+// change instead of on every attempt.
+type StopUnconfirmedError struct {
+	Name   string
+	Reason string
+	Repeat bool
+}
+
+// Error returns the reason, which describes the observed backend state.
+func (e *StopUnconfirmedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Reason
+}
+
+// Unwrap lets errors.Is match ErrStopUnconfirmed.
+func (e *StopUnconfirmedError) Unwrap() error { return ErrStopUnconfirmed }
+
+// IsRepeatedStopUnconfirmed reports whether err is an unconfirmed stop whose
+// state the provider already reported for the same session.
+func IsRepeatedStopUnconfirmed(err error) bool {
+	var unconfirmed *StopUnconfirmedError
+	return errors.As(err, &unconfirmed) && unconfirmed.Repeat
+}
