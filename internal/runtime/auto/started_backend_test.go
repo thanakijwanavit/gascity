@@ -402,3 +402,67 @@ func (p *metaErrorProvider) GetMeta(string, string) (string, error) {
 func (p *metaErrorProvider) SetMeta(string, string, string) error {
 	return errors.New("meta store unavailable")
 }
+
+// The default backend's launch metadata names a different session (a reused
+// runtime name): it is not this session's launch record, so no cross-backend
+// stop.
+func TestStopRefusesWhenTheLaunchMetadataNamesAnotherSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	if err := defaultSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("default Start: %v", err)
+	}
+	if err := defaultSP.SetMeta("agent", "GC_SESSION_NAME", "agent-old"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	p := New(defaultSP, runtime.NewFake())
+	p.RouteACP("agent")
+
+	if err := p.Stop("agent"); !errors.Is(err, runtime.ErrStopUnconfirmed) {
+		t.Fatalf("Stop = %v, want an unconfirmed stop", err)
+	}
+	if !defaultSP.IsRunning("agent") {
+		t.Fatal("a runtime whose launch metadata names another session must stay running")
+	}
+}
+
+// When the routed backend runs the session itself it is stopped there, even
+// without a launch record, and the other backend's same-named runtime is left
+// to the existing stale-route rules.
+func TestStopPrefersTheRunningConfiguredBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	startBeforeLaunchRecord(t, defaultSP, "agent")
+	acpSP := runtime.NewFake()
+	if err := acpSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+
+	if err := p.Stop("agent"); err != nil {
+		t.Fatalf("Stop = %v, want nil", err)
+	}
+	if acpSP.IsRunning("agent") {
+		t.Fatal("the routed backend's own runtime should be stopped")
+	}
+	if n := countCalls(defaultSP, "Stop", "agent"); n != 0 {
+		t.Fatalf("default backend Stop called %d times, want 0 while the routed backend runs the session", n)
+	}
+}
+
+// A warm-box relaunch on the routed backend refreshes the launch record.
+func TestRelaunchRecordsTheBackendThatRelaunchedTheSession(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent")
+	if err := acpSP.Start(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("acp Start: %v", err)
+	}
+
+	if err := p.Relaunch(context.Background(), "agent", runtime.Config{}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if got, _ := acpSP.GetMeta("agent", startedBackendKey); got != "acp" {
+		t.Fatalf("launch record after Relaunch = %q, want %q", got, "acp")
+	}
+}
