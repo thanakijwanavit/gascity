@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 )
@@ -129,6 +130,12 @@ func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperat
 
 func (e *operationEvent) finish(err error) {
 	if e == nil || e.target == nil || e.suppressed {
+		return
+	}
+	// An unconfirmed stop in a backend state the provider already reported
+	// was recorded on its first attempt; a controller retrying it every tick
+	// must not record the same failure again (runtime.StopUnconfirmedError).
+	if runtime.IsRepeatedStopUnconfirmed(err) {
 		return
 	}
 	e.payload.FinishedAt = time.Now().UTC()

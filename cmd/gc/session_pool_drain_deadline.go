@@ -540,7 +540,9 @@ func poolSlotRuntimeStoppedForRetire(
 		return false, false
 	}
 	if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
-		fmt.Fprintf(stderr, "session reconciler: drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
+		if !runtime.IsRepeatedStopUnconfirmed(err) {
+			fmt.Fprintf(stderr, "session reconciler: drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
+		}
 		return false, false
 	}
 	after, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)

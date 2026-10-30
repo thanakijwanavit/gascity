@@ -499,7 +499,7 @@ func queueDrainAckForcedTermination(
 		}()
 		// Try the ordinary provider stop once more first: it is the cheap path and
 		// it is what a merely-slow pane needs.
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) && !runtime.IsRepeatedStopUnconfirmed(err) {
 			fmt.Fprintf(stderr, "%s: stopping %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		}
 		if confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
