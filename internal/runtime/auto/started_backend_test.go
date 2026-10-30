@@ -535,3 +535,35 @@ func TestRelaunchRecordsTheBackendThatRelaunchedTheSession(t *testing.T) {
 		t.Fatalf("launch record after Relaunch = %q, want %q", got, "acp")
 	}
 }
+
+// The agent in the old pane has exited (herdr reads a pane at a bare shell
+// prompt as not running) but the pane is still there: the launching backend
+// is asked to stop it, which closes the pane, instead of the stop succeeding
+// on the routed backend and leaving the pane behind (G1 refinery wF5 under
+// the g1-j3yf1 binary).
+func TestStopClosesTheLaunchingBackendsLeftoverAfterProviderChange(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	startBeforeLaunchRecord(t, defaultSP, "refinery")
+	// The agent exited: the fake no longer lists the runtime as running, but
+	// its launch metadata (the pane binding) is still on the default backend.
+	if err := defaultSP.Stop("refinery"); err != nil {
+		t.Fatalf("default Stop: %v", err)
+	}
+	if err := defaultSP.SetMeta("refinery", "GC_SESSION_NAME", "refinery"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	stopsBefore := countCalls(defaultSP, "Stop", "refinery")
+	p := New(defaultSP, acpSP)
+	p.RouteACP("refinery")
+
+	if err := p.Stop("refinery"); err != nil {
+		t.Fatalf("Stop = %v, want nil", err)
+	}
+	if got := countCalls(defaultSP, "Stop", "refinery") - stopsBefore; got != 1 {
+		t.Fatalf("launching backend Stop called %d times, want 1 to release its leftover pane", got)
+	}
+	if n := countCalls(acpSP, "Stop", "refinery"); n != 0 {
+		t.Fatalf("routed ACP backend Stop called %d times for a session it never held, want 0", n)
+	}
+}

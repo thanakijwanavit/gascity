@@ -160,10 +160,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // to handle stale/missing route entries (e.g., after controller restart).
 //
 // When the routed backend holds neither the runtime nor a launch record for
-// the session, while the other backend runs it and its launch record names
-// the session, the configured transport changed after launch (claude on
-// herdr -> codex on acp): the runtime is stopped on the backend that started
-// it, and the stop counts only once that backend no longer reports it.
+// the session, while the other backend's launch record names the session,
+// the configured transport changed after launch (claude on herdr -> codex on
+// acp): the runtime is stopped on the backend that started it, and the stop
+// counts only once that backend no longer reports it.
 func (p *Provider) Stop(name string) error {
 	primary, primaryLabel, other, otherLabel := p.backends(name)
 	primaryRunning := primary.IsRunning(name)
@@ -223,14 +223,14 @@ func (p *Provider) Stop(name string) error {
 }
 
 // launchedOnOtherBackend reports whether other, not the routed primary,
-// launched name's live runtime: other runs it and its launch record names the
-// session, while primary holds neither the runtime nor a launch record for
-// it. A metadata read error leaves ownership unknown (false), so Stop keeps
-// its refusal to touch a same-named runtime it cannot attribute.
+// launched name's runtime: other's launch record names the session, while
+// primary holds neither the runtime nor a launch record for it. Other's
+// runtime need not be running: an agent that exited still leaves its pane
+// (herdr reads a pane at a bare shell prompt as not running), and stopping
+// on the launching backend is what closes it. A metadata read error leaves
+// ownership unknown (false), so Stop keeps its refusal to touch a same-named
+// runtime it cannot attribute.
 func launchedOnOtherBackend(name string, primary runtime.Provider, primaryLabel string, other runtime.Provider, otherLabel string) bool {
-	if !other.IsRunning(name) {
-		return false
-	}
 	if launched, err := launchRecorded(other, otherLabel, name); err != nil || !launched {
 		return false
 	}
