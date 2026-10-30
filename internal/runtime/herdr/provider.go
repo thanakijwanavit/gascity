@@ -306,7 +306,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// leaves its turn untyped and recorded, never pasted into the shell
 		// the agent left behind (g1-j3yf1).
 		if startupText != "" {
-			check := p.typeCheckFor(name, agentProcessNames(cfg.ProcessNames))
+			check := p.typeCheckFor(name, agentProcessNames(cfg.ProcessNames), !launchesCommand(spec))
 			err := awaitAgentForeground(ctx, info.PaneID, check)
 			if err == nil {
 				err = p.c.deliverStartupTurn(ctx, info.PaneID, startupText, check)
@@ -849,17 +849,18 @@ func agentAliveFromStatus(status string) bool {
 }
 
 // Nudge injects and submits text into a running agent's input. It types only
-// into the session's agent: when the pane's foreground holds anything else (a
-// shell its exited agent left behind above all, g1-j3yf1) or cannot be read,
-// nothing is typed and the error names the session and the pane's processes,
-// never the text. See typeCheckFor.
+// into the session's agent (or, for a session whose shell is the session, that
+// shell's prompt): when the pane's foreground holds anything else (a shell its
+// exited agent left behind above all, g1-j3yf1) or cannot be read, nothing is
+// typed and the error names the session and the pane's processes, never the
+// text. See typeCheckFor.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
-	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content), p.typeCheckFor(name, p.sessionAgentProcessNames(name)))
+	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content), p.typeCheckFor(name, p.sessionAgentProcessNames(name), !p.launchedCommand(name)))
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint

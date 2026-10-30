@@ -308,6 +308,45 @@ func TestNudgeAcceptsOnlyTheSessionsConfiguredAgent(t *testing.T) {
 	})
 }
 
+// A session whose shell is the session (its life launched no command) takes its
+// nudges at that shell's prompt, as the runtime contract's nudge to a running
+// session expects; anything else in its foreground still gets nothing. A G1
+// binding, whose env named a provider, never counts as one (the incident test
+// above).
+func TestNudgeTypesIntoTheShellOfAShellSession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, p *Provider)
+		fg    []proc
+	}{
+		{"empty command", func(t *testing.T, p *Provider) { startSession(t, p, guardSession, runtime.Config{}) }, bareBash},
+		{"command that is an interactive shell", func(t *testing.T, p *Provider) {
+			startSession(t, p, guardSession, runtime.Config{Command: "bash -l"})
+		}, []proc{fgProc(bareBashPID, "bash", "bash", "-l")}},
+		{"binding with no provider, left by the installed binary", func(t *testing.T, p *Provider) {
+			bindTestPane(t, p, guardSession, bindModeShell)
+		}, bareBash},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			tc.setup(t, p)
+			setForeground(t, state, bareBashPID, tc.fg...)
+			if err := p.Nudge(guardSession, runtime.TextContent("echo hello")); err != nil {
+				t.Fatalf("Nudge to a shell session at its prompt: %v", err)
+			}
+			if calls := fakeCalls(t, state); !strings.Contains(calls, "pane run %5 echo hello\n") {
+				t.Fatalf("the nudge did not reach the shell session's prompt:\n%s", calls)
+			}
+
+			setForeground(t, state, bareBashPID, fgProc(bareBashPID+1, "vim", "vim", "notes.md"))
+			from := len(fakeCalls(t, state))
+			assertRefused(t, p.Nudge(guardSession, runtime.TextContent(guardNudge)), "pane runs vim")
+			assertNothingTyped(t, state, from)
+		})
+	}
+}
+
 // Liveness: a raw session whose pane is back at a bare interactive prompt is not
 // running, so the reconciler restarts it the way it restarts an exited agent.
 // Nothing reaps the pane here: it still resolves, so Peek reads it and Stop

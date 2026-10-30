@@ -322,21 +322,9 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 			}
 			return time.Since(time.Unix(ts, 0))
 		},
-		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
-		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
-		clearBinding: func() { p.clearPaneBinding(name) },
-		launchedCommand: func() bool {
-			switch strings.TrimSpace(meta(metaLaunchedCommand)) {
-			case "true":
-				return true
-			case "false":
-				return false
-			}
-			// A binding written before Start recorded this key: a session gc
-			// started for a provider (GC_PROVIDER, seeded into the sidecar
-			// from its env) launched that provider's command. G1's sessions
-			// bound by gc 1.5.1-brru read this way until their next Start.
-			return strings.TrimSpace(meta("GC_PROVIDER")) != ""
-		},
+		probePane:       func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
+		reapPane:        func(paneID string) { _ = p.c.closePane(ctx, paneID) },
+		clearBinding:    func() { p.clearPaneBinding(name) },
+		launchedCommand: func() bool { return p.launchedCommand(name) },
 	}
 }

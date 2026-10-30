@@ -132,6 +132,25 @@ func agentProcessNames(configured []string) []string {
 	return want
 }
 
+// launchedCommand reports whether session name's life launched a command,
+// rather than running the pane's own shell as the session, as Start recorded
+// it. A binding written before Start recorded it falls back to whether the
+// session env named a provider (GC_PROVIDER, seeded into the sidecar at
+// Start): a session gc started for a provider launched that provider's
+// command. G1's sessions bound by gc 1.5.1-brru read this way until their
+// next Start. A sidecar that cannot be read reads as empty.
+func (p *Provider) launchedCommand(name string) bool {
+	v, _ := p.GetMeta(name, metaLaunchedCommand)
+	switch strings.TrimSpace(v) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	provider, _ := p.GetMeta(name, "GC_PROVIDER")
+	return strings.TrimSpace(provider) != ""
+}
+
 // sessionAgentProcessNames is agentProcessNames for the names Start recorded
 // for session name. A sidecar that cannot be read leaves the agent kinds, which
 // still refuse every shell.
@@ -177,8 +196,12 @@ type typeCheck func(ctx context.Context, paneID string) error
 // typeCheckFor is the check every text delivery to session name runs right
 // before it types: the pane's foreground process group must hold the session's
 // agent (one of want). A shell, any other program, or a foreground that cannot
-// be read gets nothing typed and a *paneNotAgentError.
-func (p *Provider) typeCheckFor(name string, want []string) typeCheck {
+// be read gets nothing typed and a *paneNotAgentError. The one shell that may
+// take text is the session itself: when its life launched no command
+// (shellIsSession: an empty command, or a command that is an interactive
+// shell), the pane's bare prompt is where its input goes, as the runtime
+// contract's nudge to a running shell session expects.
+func (p *Provider) typeCheckFor(name string, want []string, shellIsSession bool) typeCheck {
 	return func(ctx context.Context, paneID string) error {
 		shellPID, fg, err := p.c.processInfo(ctx, paneID)
 		if err != nil {
@@ -187,7 +210,10 @@ func (p *Provider) typeCheckFor(name string, want []string) typeCheck {
 		if agentInForeground(fg, want) {
 			return nil
 		}
-		shell, _ := barePromptShell(shellPID, fg)
+		shell, bare := barePromptShell(shellPID, fg)
+		if bare && shellIsSession {
+			return nil
+		}
 		return &paneNotAgentError{session: name, pane: paneID, want: want, shell: shell, fg: foregroundNames(fg)}
 	}
 }
