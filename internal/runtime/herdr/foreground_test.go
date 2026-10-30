@@ -347,6 +347,32 @@ func TestNudgeTypesIntoTheShellOfAShellSession(t *testing.T) {
 	}
 }
 
+// A launch record that cannot be read proves nothing either way, and each
+// reader takes its safe side: the type check stays strict (a bare prompt takes
+// no text even in a session recorded as a shell session), while liveness keeps
+// the session running rather than restart it on a guess.
+func TestUnreadableLaunchRecordTakesTheSafeSideForEachReader(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-0 file; the unreadable sidecar cannot be modelled")
+	}
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	startSession(t, p, guardSession, runtime.Config{})
+	setForeground(t, state, bareBashPID, bareBash...)
+	record := filepath.Join(p.metaDir, sanitize(guardSession), sanitize(metaLaunchedCommand))
+	if err := os.Chmod(record, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(record, 0o600) })
+
+	from := len(fakeCalls(t, state))
+	assertRefused(t, p.Nudge(guardSession, runtime.TextContent(guardNudge)), "pane runs a shell")
+	assertNothingTyped(t, state, from)
+	if !p.IsRunning(guardSession) {
+		t.Fatal("IsRunning = false on an unreadable launch record; a liveness read must not restart a session on a guess")
+	}
+}
+
 // Liveness: a raw session whose pane is back at a bare interactive prompt is not
 // running, so the reconciler restarts it the way it restarts an exited agent.
 // Nothing reaps the pane here: it still resolves, so Peek reads it and Stop

@@ -322,9 +322,11 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 			}
 			return time.Since(time.Unix(ts, 0))
 		},
-		probePane:       func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
-		reapPane:        func(paneID string) { _ = p.c.closePane(ctx, paneID) },
-		clearBinding:    func() { p.clearPaneBinding(name) },
-		launchedCommand: func() bool { return p.launchedCommand(name) },
+		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
+		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
+		clearBinding: func() { p.clearPaneBinding(name) },
+		// A sidecar that cannot be read reads as no command launched: the
+		// pane then keeps running, the side a liveness read errs on.
+		launchedCommand: func() bool { launched, known := p.launchedCommand(name); return known && launched },
 	}
 }

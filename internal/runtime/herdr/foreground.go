@@ -138,17 +138,33 @@ func agentProcessNames(configured []string) []string {
 // session env named a provider (GC_PROVIDER, seeded into the sidecar at
 // Start): a session gc started for a provider launched that provider's
 // command. G1's sessions bound by gc 1.5.1-brru read this way until their
-// next Start. A sidecar that cannot be read reads as empty.
-func (p *Provider) launchedCommand(name string) bool {
-	v, _ := p.GetMeta(name, metaLaunchedCommand)
+// next Start. known is false when the sidecar could not be read: each caller
+// then takes its own safe side (see shellIsSession and lookupOps).
+func (p *Provider) launchedCommand(name string) (launched, known bool) {
+	v, err := p.GetMeta(name, metaLaunchedCommand)
+	if err != nil {
+		return false, false
+	}
 	switch strings.TrimSpace(v) {
 	case "true":
-		return true
+		return true, true
 	case "false":
-		return false
+		return false, true
 	}
-	provider, _ := p.GetMeta(name, "GC_PROVIDER")
-	return strings.TrimSpace(provider) != ""
+	provider, err := p.GetMeta(name, "GC_PROVIDER")
+	if err != nil {
+		return false, false
+	}
+	return strings.TrimSpace(provider) != "", true
+}
+
+// shellIsSession reports whether session name's pane shell is the session
+// itself (its life launched no command), the one case the type check lets a
+// bare prompt take text. A sidecar that cannot be read does not say so, so
+// the check stays strict.
+func (p *Provider) shellIsSession(name string) bool {
+	launched, known := p.launchedCommand(name)
+	return known && !launched
 }
 
 // sessionAgentProcessNames is agentProcessNames for the names Start recorded

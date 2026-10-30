@@ -860,7 +860,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
-	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content), p.typeCheckFor(name, p.sessionAgentProcessNames(name), !p.launchedCommand(name)))
+	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content), p.typeCheckFor(name, p.sessionAgentProcessNames(name), p.shellIsSession(name)))
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint
