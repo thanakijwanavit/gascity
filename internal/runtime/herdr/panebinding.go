@@ -52,18 +52,26 @@ const bindingLaunchGrace = 3 * time.Minute
 // at a bare shell prompt has exited — its pane still resolves so Stop can
 // close it, but the session is not running; a raw/bare shell session
 // (bindModeShell) runs as long as its pane exists, because `exec /bin/sh -c`
-// panes die with their command.
+// panes die with their command — unless the pane sits at a bare interactive
+// prompt although the life launched a command (metaLaunchedCommand): then the
+// pane is not the one the command ran in (herdr restores panes with a fresh
+// shell after a host reboot, g1-j3yf1) and the session is not running either.
 const (
 	bindModeAgent = "agent"
 	bindModeShell = "shell"
 )
 
 // paneProbe is what probing a bound pane learned: whether the pane still
-// exists, and whether something beyond the pane's own shell is in the
-// foreground (a foreground process with a pid other than the shell's).
+// exists, whether something beyond the pane's own shell is in the
+// foreground (a foreground process with a pid other than the shell's), and
+// whether the pane sits at a bare interactive shell prompt (its root shell
+// alone in the foreground, started as an interactive shell: barePromptShell).
+// Bare implies not Busy; a pane can be neither (a raw launch's `sh -c`
+// wrapper between two commands, or a foreground herdr reported without argv).
 type paneProbe struct {
 	Exists bool
 	Busy   bool
+	Bare   bool
 }
 
 // paneLookupOps are the operations resolveBinding needs, injected as closures
@@ -88,13 +96,25 @@ type paneLookupOps struct {
 	// clearBinding drops a binding whose pane herdr confirmed gone, so a
 	// recycled pane id can never resurrect a dead session.
 	clearBinding func()
+	// launchedCommand reports whether the session's life launched a command,
+	// rather than running the pane's own shell as the session.
+	launchedCommand func() bool
 }
 
 // resolveBinding resolves a session name to its herdr pane id and a running
 // verdict: registry name lookup first (a live name is a running agent), then
 // the sidecar pane binding, trusted only after a live probe. Running is
 // mode-aware: a busy pane always runs; a bare shell prompt runs only for
-// bindModeShell. A bindModeAgent pane at a bare prompt past the launch grace
+// bindModeShell, and there only when the shell is the session. A
+// bindModeShell pane at a bare interactive prompt whose life launched a
+// command is not running: `exec /bin/sh -c` panes die with their command, so
+// a prompt there is a pane the command never ran in, as when herdr restored
+// it after a host reboot and the `claude --resume` it typed failed
+// (g1-j3yf1). It resolves for Stop and Peek, and nothing reaps it here: a
+// liveness read must not close a pane an operator may be reading (G1's Mayor
+// kept one as evidence); Stop closes it, and Start recycles its tab when the
+// reconciler restarts the session. A bindModeAgent pane at a bare prompt past
+// the launch grace
 // means the agent EXITED — under tmux the pane would have died with the
 // process, so it is reaped here (pane closed, binding cleared): nothing else
 // ever reaps it for an ephemeral wisp, whose unique tab label sees no future
@@ -123,7 +143,13 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 		ops.clearBinding()
 		return "", false, nil
 	}
-	if probe.Busy || ops.boundMode() == bindModeShell {
+	if probe.Busy {
+		return pane, true, nil
+	}
+	if ops.boundMode() == bindModeShell {
+		if probe.Bare && ops.launchedCommand() {
+			return pane, false, nil
+		}
 		return pane, true, nil
 	}
 	if ops.boundAge() > bindingLaunchGrace {
@@ -245,6 +271,7 @@ func paneProbeFrom(shellPID int, fg []proc) paneProbe {
 			break
 		}
 	}
+	_, probe.Bare = barePromptShell(shellPID, fg)
 	return probe
 }
 
@@ -298,5 +325,18 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
 		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
 		clearBinding: func() { p.clearPaneBinding(name) },
+		launchedCommand: func() bool {
+			switch strings.TrimSpace(meta(metaLaunchedCommand)) {
+			case "true":
+				return true
+			case "false":
+				return false
+			}
+			// A binding written before Start recorded this key: a session gc
+			// started for a provider (GC_PROVIDER, seeded into the sidecar
+			// from its env) launched that provider's command. G1's sessions
+			// bound by gc 1.5.1-brru read this way until their next Start.
+			return strings.TrimSpace(meta("GC_PROVIDER")) != ""
+		},
 	}
 }

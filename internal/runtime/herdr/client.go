@@ -570,21 +570,31 @@ func (c *client) paneRunCommand(ctx context.Context, paneID, command string) err
 // `agent prompt`, which owns the type+submit handshake that the pre-0.7.5
 // paste+Enter+confirm dance approximated — targeting the pane id, which agent
 // verbs accept even after the registry name is unavailable to the caller.
-// Panes with no registered agent (raw `exec /bin/sh -c` sessions, bare
-// shells) fall back to paste + Enter: there is no TUI prompt machinery to
-// confirm against, so delivery is best-effort by construction.
+// Panes with no registered agent (raw `exec /bin/sh -c` sessions) fall back
+// to paste + Enter: there is no TUI prompt machinery to confirm against, so
+// delivery is best-effort by construction.
+//
+// check runs immediately before each verb that types (the prompt, and the
+// paste after the registry round trips): a pane whose foreground is not the
+// session's agent, a bare shell above all, gets nothing (g1-j3yf1).
 //
 // Note this path does NOT confirm the submit landed: `agent prompt` without
 // --wait reports ok the moment the text is typed. Against a live mid-session
 // TUI that is reliable; a FIRST turn into a freshly-booted TUI must go
 // through deliverStartupTurn, which opts into herdr's submission
 // confirmation.
-func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
+func (c *client) deliverNudge(ctx context.Context, paneID, text string, check typeCheck) error {
+	if err := check(ctx, paneID); err != nil {
+		return err
+	}
 	err := c.agentPrompt(ctx, paneID, text)
 	if err == nil {
 		return nil
 	}
 	if !c.targetHasNoNamedAgent(ctx, paneID, err) {
+		return err
+	}
+	if err := check(ctx, paneID); err != nil {
 		return err
 	}
 	return c.pasteAndSubmit(ctx, paneID, text)
@@ -660,9 +670,14 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     Enter would answer the dialog rather than do nothing. No keystroke —
 //     report it unconfirmed and let the caller record the strand.
 //
-// Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
-// path. A non-nil error means the turn could not be confirmed submitted.
-func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+// Unregistered panes (raw `exec /bin/sh -c` sessions) keep the best-effort
+// paste+settle+Enter path. check runs immediately before the prompt and
+// before the paste, as in deliverNudge. A non-nil error means the turn could
+// not be confirmed submitted.
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string, check typeCheck) error {
+	if err := check(ctx, paneID); err != nil {
+		return err
+	}
 	args := []string{"agent", "prompt", paneID, text, "--wait"}
 	for _, s := range startupConfirmStates {
 		args = append(args, "--until", s)
@@ -673,6 +688,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 		return nil
 	}
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
+		if err := check(ctx, paneID); err != nil {
+			return err
+		}
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
 	switch herdrErrorCode(err) {

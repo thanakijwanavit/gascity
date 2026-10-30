@@ -9,6 +9,7 @@ go_library(
         "capabilities.go",
         "client.go",
         "events.go",
+        "foreground.go",
         "launchspec.go",
         "panebinding.go",
         "provider.go",

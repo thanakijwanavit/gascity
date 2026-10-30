@@ -281,7 +281,7 @@ func TestDeliverNudgeFallsBackWhenThePaneHasNoNamedAgent(t *testing.T) {
 			bin, trace := registryFake(t, tc.registered, tc.rejection)
 			c := &client{session: "gc-test", bin: bin}
 
-			err := c.deliverNudge(context.Background(), "w1:p1", "proceed with the drain")
+			err := c.deliverNudge(context.Background(), "w1:p1", "proceed with the drain", allowTyping)
 			if tc.wantErr && err == nil {
 				t.Fatal("deliverNudge returned nil for a booting agent; the turn was typed into a TUI that is not accepting input")
 			}
@@ -302,7 +302,7 @@ func TestDeliverStartupTurnFallsBackWhenThePaneHasNoNamedAgent(t *testing.T) {
 		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
 	c := &client{session: "gc-test", bin: bin}
 
-	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn"); err != nil {
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", allowTyping); err != nil {
 		t.Fatalf("deliverStartupTurn on a pane with no named agent: %v", err)
 	}
 	assertPasted(t, trace, true)

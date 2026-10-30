@@ -165,6 +165,11 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.seedMetaFromEnv(name, cfg.Env); err != nil {
 		return fmt.Errorf("herdr: seed session metadata for %q: %w", name, err)
 	}
+	// What liveness and the type check need from this launch (whether it runs
+	// a command, which processes are its agent), also before the launch.
+	if err := p.recordLaunch(name, spec, cfg.ProcessNames); err != nil {
+		return fmt.Errorf("herdr: record launch of %q: %w", name, err)
+	}
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
@@ -294,8 +299,19 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// branch) also re-delivers on the next reconcile tick; for every other
 		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
 		// last resort.
+		//
+		// The turn is typed only into the session's agent: the pane's
+		// foreground must hold it right before each typing verb, so a launch
+		// whose agent exited at once (a resume that found no conversation)
+		// leaves its turn untyped and recorded, never pasted into the shell
+		// the agent left behind (g1-j3yf1).
 		if startupText != "" {
-			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+			check := p.typeCheckFor(name, agentProcessNames(cfg.ProcessNames))
+			err := awaitAgentForeground(ctx, info.PaneID, check)
+			if err == nil {
+				err = p.c.deliverStartupTurn(ctx, info.PaneID, startupText, check)
+			}
+			if err != nil {
 				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 			}
 		}
@@ -575,7 +591,8 @@ func (p *Provider) Interrupt(name string) error {
 // never register a name; herdr ≥0.7.4 clears names on occupant change — a
 // name-only check re-Starts live sessions every tick: the spawn storm). An
 // exited agent whose pane idles at a shell prompt is NOT running, so
-// restarts still happen.
+// restarts still happen; nor is a raw session whose pane sits at a bare
+// interactive prompt (see resolveBinding).
 func (p *Provider) IsRunning(name string) bool {
 	_, running, err := resolveBinding(p.lookupOps(context.Background(), name))
 	return err == nil && running
@@ -789,6 +806,12 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 		// agentAliveFromStatus's fail-safe direction. A confirmed-gone pane
 		// clears the stale binding; a transport failure clears nothing and
 		// falls through to not-running (as a failed name query already does).
+		// So does a raw session's pane at a bare interactive prompt: it reads
+		// not running, as an exited agent's pane does, so the reconciler
+		// restarts the session and Start recycles the tab (g1-j3yf1). It does
+		// not read as a zombie (Running, not Alive): herdr implements no
+		// session-object kill for the reconciler's zombie recycle, and Start
+		// refuses with ErrSessionExists any session IsRunning calls running.
 		if _, running, perr := resolveBinding(p.lookupOps(ctx, name)); perr == nil && running {
 			return runtime.Liveness{Running: true, Alive: true}
 		}
@@ -825,14 +848,18 @@ func agentAliveFromStatus(status string) bool {
 	}
 }
 
-// Nudge injects and submits text into a running agent's input.
+// Nudge injects and submits text into a running agent's input. It types only
+// into the session's agent: when the pane's foreground holds anything else (a
+// shell its exited agent left behind above all, g1-j3yf1) or cannot be read,
+// nothing is typed and the error names the session and the pane's processes,
+// never the text. See typeCheckFor.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
-	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content))
+	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content), p.typeCheckFor(name, p.sessionAgentProcessNames(name)))
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint

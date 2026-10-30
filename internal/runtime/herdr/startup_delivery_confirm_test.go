@@ -194,12 +194,14 @@ func TestStartupDeliveryBlockedConfirmsWithoutRecovery(t *testing.T) {
 
 // Raw-exec sessions never register an agent, so there is no prompt machinery
 // to confirm against: the legacy paste+settle+Enter path stays, best-effort
-// by construction, and must not record an unconfirmed marker.
+// by construction, and must not record an unconfirmed marker. The worker's
+// process name is configured, as a provider's is, because the turn is typed
+// only into the session's own process (g1-j3yf1).
 func TestStartupDeliveryUnregisteredPaneFallsBackToPaste(t *testing.T) {
 	p, state := newFakeHerdrProvider(t)
 	listenHerdrSocket(t, p)
 
-	cfg := runtime.Config{Command: "python3 worker.py", Nudge: "Read your brief."}
+	cfg := runtime.Config{Command: "python3 worker.py", ProcessNames: []string{"python3"}, Nudge: "Read your brief."}
 	if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

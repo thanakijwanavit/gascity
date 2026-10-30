@@ -3,8 +3,10 @@ package herdr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -419,4 +421,252 @@ func TestStartupTurnIsNeverTypedIntoAShell(t *testing.T) {
 	if err != nil || !strings.Contains(v, "pane runs a shell") {
 		t.Fatalf("startup marker = %q, %v; want the strand recorded as a shell pane", v, err)
 	}
+}
+
+// allowTyping is a type check every pane passes, for client tests about what
+// follows the check.
+func allowTyping(context.Context, string) error { return nil }
+
+// ── the pieces, case by case ─────────────────────────────────────────────────
+
+// A bare prompt is the root shell alone in the foreground and started as an
+// interactive shell; a raw launch's `sh -c` wrapper, a shell running a script,
+// a foreground without argv, or anything beside the root is not.
+func TestBarePromptShell(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		shellPID int
+		fg       []proc
+		shell    string
+	}{
+		{"G1 failed-resume pane: bash, argv [bash]", bareBashPID, bareBash, "bash"},
+		{"login shell", 100, []proc{fgProc(100, "-zsh", "-zsh")}, "zsh"},
+		{"shell with interactive flags", 100, []proc{fgProc(100, "bash", "/bin/bash", "--login", "-i")}, "bash"},
+		{"G1 live claude: wrapper and agent", liveClaudePID, liveClaude, ""},
+		{"raw wrapper alone between two commands", liveClaudePID, liveClaude[:1], ""},
+		{"shell running a script", 100, []proc{fgProc(100, "bash", "bash", "/srv/run.sh")}, ""},
+		{"shell given -lc", 100, []proc{fgProc(100, "bash", "bash", "-lc", "claude")}, ""},
+		{"argv not reported", 100, []proc{fgProc(100, "bash")}, ""},
+		{"root is not a shell", 100, []proc{fgProc(100, "claude", "claude")}, ""},
+		{"argv[0] is not a shell", 100, []proc{fgProc(100, "bash", "claude")}, ""},
+		{"a job beside the shell", 100, []proc{fgProc(100, "bash", "bash"), fgProc(101, "sleep", "sleep", "5")}, ""},
+		{"a shell that is not the root", 100, []proc{fgProc(101, "bash", "bash")}, ""},
+		{"no foreground", 100, nil, ""},
+		{"no shell pid", 0, []proc{fgProc(0, "bash", "bash")}, ""},
+	} {
+		shell, bare := barePromptShell(tc.shellPID, tc.fg)
+		if shell != tc.shell || bare != (tc.shell != "") {
+			t.Errorf("%s: barePromptShell = %q, %v; want %q, %v", tc.name, shell, bare, tc.shell, tc.shell != "")
+		}
+		if got := paneProbeFrom(tc.shellPID, tc.fg).Bare; got != bare {
+			t.Errorf("%s: paneProbeFrom(...).Bare = %v; want %v", tc.name, got, bare)
+		}
+	}
+}
+
+// The agent is matched exactly, on a process's name or its argv[0]'s program
+// name, and never as a shell.
+func TestAgentInForeground(t *testing.T) {
+	claude := []string{"node", "claude"}
+	for _, tc := range []struct {
+		name string
+		fg   []proc
+		want []string
+		ok   bool
+	}{
+		{"G1 live claude", liveClaude, claude, true},
+		{"claude named by its version", []proc{fgProc(7, "2.1.216", "claude")}, claude, true},
+		{"claude by the path in argv[0]", []proc{fgProc(7, "2.1.216", "/home/u/.local/bin/claude")}, claude, true},
+		{"a configured node agent", []proc{fgProc(7, "node", "node", "cli.js")}, claude, true},
+		{"bare bash", bareBash, claude, false},
+		{"bash -c claude", []proc{fgProc(7, "bash", "bash", "-c", "claude")}, claude, false},
+		{"bash claiming to be claude", []proc{fgProc(7, "bash", "claude")}, claude, false},
+		{"login shell claiming to be claude", []proc{fgProc(7, "-zsh", "claude")}, claude, false},
+		{"claudex", []proc{fgProc(7, "claudex", "claudex")}, claude, false},
+		{"pid 0", []proc{fgProc(0, "claude", "claude")}, claude, false},
+		{"no foreground", nil, claude, false},
+		{"nothing accepted", liveClaude, nil, false},
+	} {
+		if got := agentInForeground(tc.fg, tc.want); got != tc.ok {
+			t.Errorf("%s: agentInForeground = %v; want %v", tc.name, got, tc.ok)
+		}
+	}
+}
+
+// A session's shell is the session for an empty command and for a command that
+// is an interactive shell; every other launch runs a command.
+func TestLaunchesCommand(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		"":                  false,
+		"bash":              false,
+		"bash -l":           false,
+		"/bin/zsh --login":  false,
+		"claude":            true,
+		"claude --resume":   true,
+		rawClaudeCommand:    true,
+		"python3 worker.py": true,
+		"bash -c 'claude'":  true,
+		"bash run.sh":       true,
+		"zcode-repl":        true,
+	} {
+		if got := launchesCommand(launchSpecFor(cmd)); got != want {
+			t.Errorf("launchesCommand(%q) = %v; want %v", cmd, got, want)
+		}
+	}
+}
+
+// The configured names less shells, or the agent kinds when none remain.
+func TestAgentProcessNames(t *testing.T) {
+	if got := agentProcessNames([]string{"node", " claude ", ""}); !slices.Equal(got, []string{"node", "claude"}) {
+		t.Errorf("configured names = %v; want [node claude]", got)
+	}
+	if got := agentProcessNames([]string{"bash", "node"}); !slices.Equal(got, []string{"node"}) {
+		t.Errorf("a shell among the names = %v; want [node]", got)
+	}
+	kinds := agentProcessNames([]string{"bash", "-zsh"})
+	for _, k := range []string{"claude", "codex", "kimi"} {
+		if !slices.Contains(kinds, k) {
+			t.Errorf("fallback %v lacks the agent kind %q", kinds, k)
+		}
+	}
+	for _, sh := range []string{"bash", "zsh", "sh"} {
+		if slices.Contains(kinds, sh) {
+			t.Errorf("fallback %v accepts the shell %q", kinds, sh)
+		}
+	}
+	if got := agentProcessNames(nil); !slices.Equal(got, kinds) {
+		t.Errorf("no names = %v; want the agent kinds %v", got, kinds)
+	}
+}
+
+// The shell-mode rule on its own: not running only at a bare prompt of a life
+// that launched a command, and nothing reaped or cleared either way.
+func TestResolveBindingShellModeAtBarePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		probe    paneProbe
+		launched bool
+		running  bool
+	}{
+		{"launched command, bare prompt", paneProbe{Exists: true, Bare: true}, true, false},
+		{"shell is the session, bare prompt", paneProbe{Exists: true, Bare: true}, false, true},
+		{"launched command, neither busy nor bare", paneProbe{Exists: true}, true, true},
+		{"launched command, busy", paneProbe{Exists: true, Busy: true}, true, true},
+	} {
+		rec := &resolveOpsRec{}
+		ops := opsForRec(t, false, nil, "%5", bindModeShell, tc.probe, nil, rec)
+		ops.launchedCommand = func() bool { return tc.launched }
+		pane, running, err := resolveBinding(ops)
+		if err != nil || pane != "%5" || running != tc.running {
+			t.Errorf("%s: resolveBinding = %q, %v, %v; want %%5, %v, nil", tc.name, pane, running, err, tc.running)
+		}
+		if rec.reaped != "" || rec.cleared {
+			t.Errorf("%s: a shell-mode pane was reaped (%q) or its binding cleared (%v)", tc.name, rec.reaped, rec.cleared)
+		}
+	}
+}
+
+// Start records, before the launch, whether the life runs a command and which
+// processes are its agent, and a prior life's names do not outlive a life that
+// configured none.
+func TestStartRecordsWhatTheLaunchRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cfg       runtime.Config
+		prior     string
+		launched  string
+		processes string
+	}{
+		{"raw claude", runtime.Config{Command: rawClaudeCommand, ProcessNames: []string{"node", "claude"}}, "", "true", "node\nclaude"},
+		{"empty command", runtime.Config{}, "", "false", ""},
+		{"kind launch after a life that named codex", runtime.Config{Command: "claude"}, "codex", "true", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			if tc.prior != "" {
+				if err := p.SetMeta(guardSession, metaAgentProcesses, tc.prior); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rewriteFake(t, p, `if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi`,
+				`if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
+    if [ -e "$METADIR/$3/GC_HERDR_LAUNCHED_COMMAND" ]; then : > "$STATE/launch_recorded_before_launch"; fi`)
+			startSession(t, p, guardSession, tc.cfg)
+			if v, _ := p.GetMeta(guardSession, metaLaunchedCommand); v != tc.launched {
+				t.Errorf("%s = %q; want %q", metaLaunchedCommand, v, tc.launched)
+			}
+			if v, _ := p.GetMeta(guardSession, metaAgentProcesses); v != tc.processes {
+				t.Errorf("%s = %q; want %q", metaAgentProcesses, v, tc.processes)
+			}
+			if _, err := os.Stat(filepath.Join(state, "agent_started")); err == nil {
+				if _, err := os.Stat(filepath.Join(state, "launch_recorded_before_launch")); err != nil {
+					t.Error("the launch facts were not in the sidecar before the agent launch")
+				}
+			}
+		})
+	}
+}
+
+// The check runs right before each verb that types: once before the prompt,
+// and again before the paste that follows the registry round trips. An agent
+// that leaves in between gets nothing pasted, and a refusal before the prompt
+// issues no verb at all.
+func TestDeliveryChecksRightBeforeEachTypingVerb(t *testing.T) {
+	const agentless = `{"error":{"code":"agent_not_found","message":"no agent registered for w1:p1"},"id":"cli:agent:prompt"}`
+	gone := errors.New("the agent left the pane")
+	deliveries := map[string]func(c *client, check typeCheck) error{
+		"nudge": func(c *client, check typeCheck) error {
+			return c.deliverNudge(context.Background(), "w1:p1", "proceed with the drain", check)
+		},
+		"startup turn": func(c *client, check typeCheck) error {
+			return c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", check)
+		},
+	}
+	for name, deliver := range deliveries {
+		t.Run(name+": agent leaves before the paste", func(t *testing.T) {
+			bin, trace := registryFake(t, []string{}, agentless)
+			calls := 0
+			err := deliver(&client{session: "gc-test", bin: bin}, func(context.Context, string) error {
+				if calls++; calls > 1 {
+					return gone
+				}
+				return nil
+			})
+			if !errors.Is(err, gone) || calls != 2 {
+				t.Fatalf("delivery = %v after %d checks; want the second check's refusal", err, calls)
+			}
+			assertPasted(t, trace, false)
+		})
+		t.Run(name+": refused before the prompt", func(t *testing.T) {
+			bin, trace := registryFake(t, []string{}, agentless)
+			if err := deliver(&client{session: "gc-test", bin: bin}, func(context.Context, string) error { return gone }); !errors.Is(err, gone) {
+				t.Fatalf("delivery = %v; want the check's refusal", err)
+			}
+			if _, err := os.Stat(trace); !os.IsNotExist(err) {
+				b, _ := os.ReadFile(trace)
+				t.Fatalf("herdr was called although the check refused:\n%s", b)
+			}
+		})
+	}
+}
+
+// A refusal is a *paneNotAgentError whose cause, when the foreground could not
+// be read, is herdr's error, and whose text names the session, the pane and
+// what runs there.
+func TestNudgeRefusalCarriesItsReason(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	startSession(t, p, guardSession, runtime.Config{Command: "claude"})
+
+	setForegroundReply(t, state, `{"error":{"code":"internal_error","message":"process table unavailable"}}`)
+	err := p.Nudge(guardSession, runtime.TextContent(guardNudge))
+	var refused *paneNotAgentError
+	if !errors.As(err, &refused) || herdrErrorCode(err) != "internal_error" {
+		t.Fatalf("Nudge = %v; want a *paneNotAgentError wrapping herdr's internal_error", err)
+	}
+
+	setForeground(t, state, 100, fgProc(101, "vim", "vim", "notes.md"))
+	err = p.Nudge(guardSession, runtime.TextContent(guardNudge))
+	assertRefused(t, err, "pane runs vim", "%5", "agent: any of")
 }
