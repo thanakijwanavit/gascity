@@ -39,6 +39,7 @@ go_test(
         "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
+        "foreground_test.go",
         "identity_meta_test.go",
         "kindpath_live_test.go",
         "launchspec_test.go",

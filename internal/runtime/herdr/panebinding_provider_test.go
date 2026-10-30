@@ -23,7 +23,8 @@ import (
 // raw commands are typed into the pane and never register anything. State
 // files drive the scenario (registered / pane_gone / busy / name_taken /
 // agent_blocked, plus the startup-delivery verdicts prompt_stalled /
-// prompt_times_out / prompt_blocked and wait_times_out), and calls.log records every verb so
+// prompt_times_out / prompt_blocked and wait_times_out, and foreground.json for
+// a pane foreground a test fixes), and calls.log records every verb so
 // tests can assert what was — and crucially was NOT — issued (the spawn storm
 // was one placement per reconcile tick).
 
@@ -80,6 +81,8 @@ agent_start)
   else
     : > "$STATE/agent_started"
     : > "$STATE/registered"
+    # The launched kind, which pane process-info then reports in the foreground.
+    printf '%s' "$5" > "$STATE/kind"
     if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi
     if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
@@ -124,12 +127,22 @@ pane_run)
   printf '%s' "$4" | sed -e 's|^exec /bin/sh -c ||' -e "s/^'//" -e "s/'\$//" > "$STATE/rawcmd"
   exit 0 ;;
 pane_process-info)
-  if [ -e "$STATE/pane_gone" ]; then
+  if [ -e "$STATE/foreground.json" ]; then
+    # A test fixed the pane's foreground (setForeground in foreground_test.go).
+    cat "$STATE/foreground.json"
+  elif [ -e "$STATE/pane_gone" ]; then
     printf '%s' '{"error":{"code":"pane_not_found","message":"pane not found"}}'
   elif [ -e "$STATE/rawcmd" ]; then
-    printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv":["/bin/sh","-c","'"$(cat "$STATE/rawcmd")"'"]}]}}}'
+    # The exec'd /bin/sh -c wrapper is the pane's root and runs the command's
+    # program as its child (dash forks it rather than exec'ing it).
+    raw=$(cat "$STATE/rawcmd"); prog=${raw%% *}; prog=${prog##*/}
+    printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv":["/bin/sh","-c","'"$raw"'"]},{"pid":4243,"name":"'"$prog"'","argv":["'"$prog"'"]}]}}}'
   elif [ -e "$STATE/busy" ]; then
     printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude"}]}}}'
+  elif [ -e "$STATE/registered" ] && [ -e "$STATE/kind" ]; then
+    # A kind launch: the agent herdr started runs in the pane's foreground.
+    kind=$(cat "$STATE/kind")
+    printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"'"$kind"'","argv":["'"$kind"'"]}]}}}'
   else
     printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4242,"name":"zsh"}]}}}'
   fi ;;
