@@ -1866,6 +1866,7 @@ go_test(
         "residency_namespace_test.go",
         "residency_topology_test.go",
         "retired_key_strict_test.go",
+        "rig_add_checkout_guard_test.go",
         "rig_add_path_durability_test.go",
         "rig_anywhere_test.go",
         "rig_beads_test.go",

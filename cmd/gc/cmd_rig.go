@@ -313,6 +313,10 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	return code
 }
 
+// rigBdInitCommitSubject is the subject prefix of the commit bd init makes
+// on the repository it initializes.
+const rigBdInitCommitSubject = "bd init"
+
 func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer, opts ...rigAddOption) (config.Rig, int) {
 	addOpts := newRigAddOptions(opts...)
 	// Preflight the rig path before loading config so an invalid rig path is
@@ -322,6 +326,26 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
 	}
+	// A checkout missing files HEAD tracks must not become a rig: bd init
+	// auto-commits on the checked-out branch, and over a gutted index that
+	// commit records every tracked file as deleted (g1-yecdn).
+	rigGit := git.New(rigPath)
+	if err := rigGit.CheckoutIntact(); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\ngc rig add: restore it with lazy fetch on first: env -u GIT_NO_LAZY_FETCH git -C %s restore --source=HEAD --staged --worktree -- .\n", err, rigPath) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	}
+	// bd init commits onto the rig's checked-out branch. Undo any commit it
+	// made so the rig stays at the commit the user handed us; the new .beads
+	// files stay on disk.
+	headBeforeInit := rigGit.HeadCommit()
+	defer func() {
+		n, undoErr := rigGit.UndoCommitsSince(headBeforeInit, rigBdInitCommitSubject)
+		if undoErr != nil {
+			fmt.Fprintf(stderr, "gc rig add: warning: %v\n", undoErr) //nolint:errcheck // best-effort stderr
+		} else if n > 0 {
+			fmt.Fprintf(stderr, "gc rig add: undid %d bd init commit(s) on the rig branch; HEAD is back at %s\n", n, headBeforeInit) //nolint:errcheck // best-effort stderr
+		}
+	}()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
