@@ -3739,7 +3739,7 @@ esac
 	for _, want := range []string{
 		"pwd=" + realRigDir,
 		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		"init --server -p tc --skip-hooks --database tc",
+		"init --server -p tc --skip-hooks --stealth --database tc",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
@@ -4493,7 +4493,7 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 		t.Fatalf("read recorded bd args: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
-	want := "init --quiet --proxied-server --proxied-server-idle-timeout 0 --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents " + cityDir
+	want := "init --quiet --proxied-server --proxied-server-idle-timeout 0 --proxied-server-external-host db.example --proxied-server-external-port 4406 -p gc --database hq --skip-hooks --skip-agents --stealth " + cityDir
 	if got != want {
 		t.Fatalf("bd args = %q, want %q", got, want)
 	}

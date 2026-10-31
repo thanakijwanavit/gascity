@@ -38,6 +38,9 @@ func TestDefaultRigBdStoreInitPinsIdleNeverOnProxiedScopes(t *testing.T) {
 		t.Fatalf("the initializer did not invoke bd: %v", err)
 	}
 	invocation := string(data)
+	if !strings.Contains(invocation, "--stealth") {
+		t.Fatalf("bd init may commit on the rig branch: %s", invocation)
+	}
 	if !strings.Contains(invocation, "--proxied-server") {
 		t.Fatalf("bd was not asked for a proxied store: %s", invocation)
 	}
@@ -103,6 +106,9 @@ func TestDefaultRigBdStoreKeepsDirectServerForNonBdContractCity(t *testing.T) {
 		t.Fatalf("the initializer did not invoke bd: %v", err)
 	}
 	invocation := string(data)
+	if !strings.Contains(invocation, "--stealth") {
+		t.Fatalf("bd init may commit on the rig branch: %s", invocation)
+	}
 	if strings.Contains(invocation, "--proxied-server") {
 		t.Fatalf("bd was asked for a proxied store on a non-bd-contract city: %s", invocation)
 	}

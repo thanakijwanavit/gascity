@@ -3081,12 +3081,12 @@ run_bd_init_pinned() {
     local host="$4"
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
-        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents --stealth \
             --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
         return 0
     fi
 
-    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents --stealth \
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
 }
 
@@ -3116,7 +3116,7 @@ run_bd_init_pinned_over_verified_empty() {
     if [ -f "$metadata_path" ]; then
         mv -f "$metadata_path" "$stub_aside" || die "could not set aside metadata stub for $dir before a plain bd init over a verified-empty store"
     fi
-    if ! run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+    if ! run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents --stealth \
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&-; then
         if [ -f "$stub_aside" ]; then
             mv -f "$stub_aside" "$metadata_path" || die "bd init failed for $dir, and could not restore the metadata stub set aside at $stub_aside; restore it manually before retrying"
@@ -3159,7 +3159,7 @@ run_bd_init_proxied() {
         if [ -n "$dolt_database" ]; then
             set -- "$@" --database "$dolt_database"
         fi
-        set -- "$@" --skip-hooks --skip-agents "$dir"
+        set -- "$@" --skip-hooks --skip-agents --stealth "$dir"
         trace_bd_argv "$@"
         "$bd_bin" "$@"
     )
@@ -3195,10 +3195,10 @@ doltlite_bd_schema_ready() {
 run_bd_doltlite_init() {
     local dir="$1" prefix="$2" database="$3" reinit="${4:-false}"
     if [ "$reinit" = true ]; then
-        run_bd_doltlite "$dir" init --reinit-local --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+        run_bd_doltlite "$dir" init --reinit-local --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents --stealth || die "bd doltlite init failed for $dir"
         return 0
     fi
-    run_bd_doltlite "$dir" init --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+    run_bd_doltlite "$dir" init --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents --stealth || die "bd doltlite init failed for $dir"
 }
 
 ensure_doltlite_bd_schema() {
@@ -4209,7 +4209,7 @@ op_provider_owned_init() {
             ;;
         *) die "invalid provider-owned beads transport/target: ${GC_BEADS_TRANSPORT:-}/${GC_BEADS_TARGET:-}" ;;
     esac
-    set -- "$@" -p "$prefix" --skip-hooks --skip-agents
+    set -- "$@" -p "$prefix" --skip-hooks --skip-agents --stealth
     [ -n "$database" ] && set -- "$@" --database "$database"
     set -- "$@" "$dir"
     # Registering gc's bead vocabulary with the new store is deliberately NOT

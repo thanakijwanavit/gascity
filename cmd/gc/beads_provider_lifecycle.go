@@ -2009,6 +2009,7 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	} else {
 		args = append(args[:1], "--server", "-p", prefix, "--skip-hooks")
 	}
+	args = append(args, "--stealth")
 	if canonicalDoltDatabase != "" {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}

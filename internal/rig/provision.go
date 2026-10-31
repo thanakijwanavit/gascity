@@ -80,6 +80,11 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 
 	// Step 3: detect git and resolve the default branch.
 	hasGit, defaultBranchOverride, resolvedDefaultBranch, defaultBranchRemote := resolveGitDefaultBranch(deps, req, rigPath)
+	if hasGit {
+		if err := validateCheckout(rigPath); err != nil {
+			return config.Rig{}, result, err
+		}
+	}
 
 	// Step 4: canonicalize --include tokens that name a pack (builtin or
 	// registry) rather than a path, and reject any token that resolves to no

@@ -239,6 +239,10 @@ registered city.
 In Gas City, a project directory registered with a city is called a "rig."
 Rigging a project's directory lets agents work in it.
 
+For a new checkout, use `env -u GIT_NO_LAZY_FETCH git clone <url>` without
+`--filter=blob:none`. If `gc rig add` reports an incomplete checkout, restore
+its index and tracked files with lazy fetching enabled before retrying.
+
 ```shell
 ~/my-city
 $ gc rig add ~/my-project
