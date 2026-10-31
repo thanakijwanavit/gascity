@@ -313,9 +313,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	return code
 }
 
-// rigBdInitCommitSubject is the subject prefix of the commit bd init makes
-// on the repository it initializes.
-const rigBdInitCommitSubject = "bd init"
+// rigBdInitCommitSubject is the subject of the commit bd init makes on the
+// repository it initializes.
+const rigBdInitCommitSubject = "bd init: initialize beads issue tracking"
 
 func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer, opts ...rigAddOption) (config.Rig, int) {
 	addOpts := newRigAddOptions(opts...)
@@ -338,8 +338,9 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	// made so the rig stays at the commit the user handed us; the new .beads
 	// files stay on disk.
 	headBeforeInit := rigGit.HeadCommit()
+	initStarted := time.Now()
 	defer func() {
-		n, undoErr := rigGit.UndoCommitsSince(headBeforeInit, rigBdInitCommitSubject)
+		n, undoErr := rigGit.UndoCommitsSince(headBeforeInit, rigBdInitCommitSubject, initStarted)
 		if undoErr != nil {
 			fmt.Fprintf(stderr, "gc rig add: warning: %v\n", undoErr) //nolint:errcheck // best-effort stderr
 		} else if n > 0 {

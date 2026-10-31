@@ -2,7 +2,9 @@ package git
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrCheckoutIncomplete reports a working copy whose index or worktree is
@@ -70,15 +72,20 @@ func (g *Git) HeadCommit() string {
 	return strings.TrimSpace(out)
 }
 
-// UndoCommitsSince moves the current branch back to base with a mixed reset
-// when every commit in base..HEAD has a subject starting with subjectPrefix.
-// The worktree is left as it is, so files those commits added stay on disk
-// untracked. It returns how many commits were undone. When HEAD is base, or
-// base is empty, it does nothing. When any commit in the range has another
-// subject, or HEAD no longer descends from base, it changes nothing and
-// returns an error naming the commit, so work it does not recognise is never
-// moved off the branch.
-func (g *Git) UndoCommitsSince(base, subjectPrefix string) (int, error) {
+// UndoCommitsSince moves the current branch back to base when every commit
+// in base..HEAD has exactly the given subject and was committed no earlier
+// than notBefore (git records whole seconds, so notBefore is truncated to the
+// second). The branch moves only if HEAD still names the commit that was
+// checked: the ref update is a compare-and-swap, so a commit landing between
+// the check and the move fails it instead of being dropped. The index is then
+// reset to base and the worktree is left as it is, so files those commits
+// added stay on disk untracked. It returns how many commits were undone.
+//
+// When HEAD is base, or base is empty, it does nothing. When any commit in the
+// range has another subject or an earlier commit time, or HEAD no longer
+// descends from base, it changes nothing and returns an error naming the
+// commit, so work it does not recognise is never moved off the branch.
+func (g *Git) UndoCommitsSince(base, subject string, notBefore time.Time) (int, error) {
 	if strings.TrimSpace(base) == "" {
 		return 0, nil
 	}
@@ -89,20 +96,38 @@ func (g *Git) UndoCommitsSince(base, subjectPrefix string) (int, error) {
 	if _, err := g.run("merge-base", "--is-ancestor", base, head); err != nil {
 		return 0, fmt.Errorf("HEAD %s in %s no longer descends from %s; leaving the branch as it is", short(head), g.workDir, short(base))
 	}
-	out, err := g.run("log", "--format=%H%x00%s", base+".."+head)
+	out, err := g.run("log", "--format=%H%x00%ct%x00%s", base+".."+head)
 	if err != nil {
 		return 0, fmt.Errorf("listing commits since %s in %s: %w", short(base), g.workDir, err)
 	}
+	floor := notBefore.Truncate(time.Second).Unix()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	for _, line := range lines {
-		sha, subject, _ := strings.Cut(line, "\x00")
-		if !strings.HasPrefix(subject, subjectPrefix) {
-			return 0, fmt.Errorf("commit %s in %s (%q) was not made by %q; leaving the branch as it is", short(sha), g.workDir, subject, subjectPrefix)
+		fields := strings.SplitN(line, "\x00", 3)
+		if len(fields) != 3 {
+			return 0, fmt.Errorf("unexpected git log line %q in %s; leaving the branch as it is", line, g.workDir)
+		}
+		sha, ctRaw, got := fields[0], fields[1], fields[2]
+		ct, err := strconv.ParseInt(ctRaw, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("commit %s in %s has commit time %q: %w; leaving the branch as it is", short(sha), g.workDir, ctRaw, err)
+		}
+		if got != subject {
+			return 0, fmt.Errorf("commit %s in %s (%q) is not a %q commit; leaving the branch as it is", short(sha), g.workDir, got, subject)
+		}
+		if ct < floor {
+			return 0, fmt.Errorf("commit %s in %s (%q) predates %s; leaving the branch as it is", short(sha), g.workDir, got, notBefore.UTC().Format(time.RFC3339))
 		}
 	}
-	if _, err := g.run("reset", "--quiet", "--mixed", base); err != nil {
-		return 0, fmt.Errorf("resetting %s to %s: %w", g.workDir, short(base), err)
+	if _, err := g.run("update-ref", "-m", "undo "+subject, "HEAD", base, head); err != nil {
+		return 0, fmt.Errorf("moving %s back to %s (HEAD changed since it was checked?): %w", g.workDir, short(base), err)
 	}
+	if _, err := g.run("read-tree", base); err != nil {
+		return 0, fmt.Errorf("resetting index in %s to %s after moving the branch: %w", g.workDir, short(base), err)
+	}
+	// read-tree drops cached stat data; refresh it so unchanged files are not
+	// reported as modified. A non-zero exit only lists files that differ.
+	_, _ = g.run("update-index", "-q", "--refresh")
 	return len(lines), nil
 }
 

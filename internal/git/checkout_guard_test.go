@@ -3,9 +3,11 @@ package git
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initTreeRepo creates a repo with three tracked files in one commit.
@@ -97,6 +99,8 @@ func TestCheckoutIntactNotARepoOrUnborn(t *testing.T) {
 	}
 }
 
+const bdInitSubject = "bd init: initialize beads issue tracking"
+
 // simulateBdInitCommit reproduces bd init's auto-commit over a gutted index:
 // it adds .beads and commits, recording every other tracked file as deleted.
 func simulateBdInitCommit(t *testing.T, dir string) {
@@ -108,12 +112,13 @@ func simulateBdInitCommit(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	runGit(t, dir, "add", ".beads")
-	runGit(t, dir, "commit", "-q", "-m", "bd init: initialize beads issue tracking")
+	runGit(t, dir, "commit", "-q", "-m", bdInitSubject)
 }
 
 func TestUndoCommitsSinceUndoesBdInitCommitAndKeepsFiles(t *testing.T) {
 	dir := initTreeRepo(t)
 	g := New(dir)
+	start := time.Now()
 	base := g.HeadCommit()
 	runGit(t, dir, "read-tree", "--empty")
 	simulateBdInitCommit(t, dir)
@@ -121,7 +126,7 @@ func TestUndoCommitsSinceUndoesBdInitCommitAndKeepsFiles(t *testing.T) {
 		t.Fatalf("precondition: bd init commit should delete 3 files, got:\n%s", del)
 	}
 
-	n, err := g.UndoCommitsSince(base, "bd init")
+	n, err := g.UndoCommitsSince(base, bdInitSubject, start)
 	if err != nil || n != 1 {
 		t.Fatalf("UndoCommitsSince = (%d, %v), want (1, nil)", n, err)
 	}
@@ -139,12 +144,13 @@ func TestUndoCommitsSinceUndoesBdInitCommitAndKeepsFiles(t *testing.T) {
 func TestUndoCommitsSinceLeavesForeignCommits(t *testing.T) {
 	dir := initTreeRepo(t)
 	g := New(dir)
+	start := time.Now()
 	base := g.HeadCommit()
 	simulateBdInitCommit(t, dir)
 	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "feat: someone else's work")
 	head := g.HeadCommit()
 
-	if n, err := g.UndoCommitsSince(base, "bd init"); err == nil || n != 0 {
+	if n, err := g.UndoCommitsSince(base, bdInitSubject, start); err == nil || n != 0 {
 		t.Fatalf("UndoCommitsSince over a foreign commit = (%d, %v), want (0, error)", n, err)
 	}
 	if got := g.HeadCommit(); got != head {
@@ -155,11 +161,12 @@ func TestUndoCommitsSinceLeavesForeignCommits(t *testing.T) {
 func TestUndoCommitsSinceNoOps(t *testing.T) {
 	dir := initTreeRepo(t)
 	g := New(dir)
+	start := time.Now()
 	base := g.HeadCommit()
-	if n, err := g.UndoCommitsSince(base, "bd init"); err != nil || n != 0 {
+	if n, err := g.UndoCommitsSince(base, bdInitSubject, start); err != nil || n != 0 {
 		t.Fatalf("UndoCommitsSince at base = (%d, %v), want (0, nil)", n, err)
 	}
-	if n, err := g.UndoCommitsSince("", "bd init"); err != nil || n != 0 {
+	if n, err := g.UndoCommitsSince("", bdInitSubject, start); err != nil || n != 0 {
 		t.Fatalf("UndoCommitsSince with empty base = (%d, %v), want (0, nil)", n, err)
 	}
 }
@@ -167,13 +174,51 @@ func TestUndoCommitsSinceNoOps(t *testing.T) {
 func TestUndoCommitsSinceRefusesDivergedHead(t *testing.T) {
 	dir := initTreeRepo(t)
 	g := New(dir)
-	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "bd init: one")
+	start := time.Now()
+	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", bdInitSubject)
 	base := g.HeadCommit()
 	runGit(t, dir, "reset", "-q", "--hard", "HEAD~1")
-	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "bd init: other")
+	if err := os.WriteFile(filepath.Join(dir, "f1"), []byte("diverged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "commit", "-q", "-am", bdInitSubject)
 	head := g.HeadCommit()
-	if _, err := g.UndoCommitsSince(base, "bd init"); err == nil {
+	if _, err := g.UndoCommitsSince(base, bdInitSubject, start); err == nil {
 		t.Fatal("UndoCommitsSince with HEAD not descending from base = nil error, want error")
+	}
+	if got := g.HeadCommit(); got != head {
+		t.Fatalf("HEAD moved to %s, want %s", got, head)
+	}
+}
+
+func TestUndoCommitsSinceRefusesLookalikeSubject(t *testing.T) {
+	dir := initTreeRepo(t)
+	g := New(dir)
+	start := time.Now()
+	base := g.HeadCommit()
+	runGit(t, dir, "commit", "-q", "--allow-empty", "-m", "bd init: my own follow-up")
+	head := g.HeadCommit()
+	if _, err := g.UndoCommitsSince(base, bdInitSubject, start); err == nil {
+		t.Fatal("UndoCommitsSince over a look-alike subject = nil error, want error")
+	}
+	if got := g.HeadCommit(); got != head {
+		t.Fatalf("HEAD moved to %s, want %s", got, head)
+	}
+}
+
+func TestUndoCommitsSinceRefusesCommitOlderThanStart(t *testing.T) {
+	dir := initTreeRepo(t)
+	g := New(dir)
+	base := g.HeadCommit()
+	cmd := exec.Command("git", "commit", "-q", "--allow-empty", "-m", bdInitSubject)
+	cmd.Dir = dir
+	cmd.Env = append(sanitizeGitEnv(os.Environ()), "GIT_COMMITTER_DATE=2020-01-01T00:00:00Z")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	head := g.HeadCommit()
+	if _, err := g.UndoCommitsSince(base, bdInitSubject, time.Now()); err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("UndoCommitsSince over a commit older than start = %v, want a predates error", err)
 	}
 	if got := g.HeadCommit(); got != head {
 		t.Fatalf("HEAD moved to %s, want %s", got, head)
