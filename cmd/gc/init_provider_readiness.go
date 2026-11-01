@@ -616,6 +616,7 @@ var initRunDoltConfigGet = func(ctx context.Context, key string) (string, error)
 	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
 		var stdout, stderr bytes.Buffer
 		cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+		setInitProbeParentDeathSignal(cmd)
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 		cmd.WaitDelay = initProbeWaitDelay
@@ -646,6 +647,7 @@ var initRunVersion = func(binary string) (string, error) {
 	var out []byte
 	err := runInitProbeWithRetry(context.Background(), binary+" version", func(ctx context.Context) error {
 		cmd := initRunVersionCommandContext(ctx, binary, "version")
+		setInitProbeParentDeathSignal(cmd)
 		cmd.WaitDelay = initProbeWaitDelay
 		var runErr error
 		out, runErr = cmd.Output()
