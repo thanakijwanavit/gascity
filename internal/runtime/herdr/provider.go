@@ -1116,6 +1116,13 @@ func placementFor(name string, env map[string]string) (workspace, tab string) {
 	// deacon, …) have no GC_RIG and keep their town workspace.
 	if rig := strings.TrimSpace(env["GC_RIG"]); rig != "" {
 		workspace = rig
+	} else if ws := strings.TrimSpace(env["GC_HERDR_WORKSPACE"]); ws != "" {
+		// Explicit placement for agents with no rig. Configured named sessions
+		// ignore tmux_alias, so without this a city-level agent (planner,
+		// gastown.deacon, a city pool) always gets a workspace of its own name.
+		// Set it per agent (env = { GC_HERDR_WORKSPACE = "..." }) or city-wide
+		// via [workspace.env]; GC_RIG still wins, so rig agents never move.
+		workspace = ws
 	}
 	// Replace a wisp id with the themed instance alias so tabs read e.g.
 	// "polecat-furiosa" rather than "polecat-az-wisp-3nvj3yx". The role prefix

@@ -102,6 +102,45 @@ func TestPlacementFor(t *testing.T) {
 			wantTab:  "mayor",
 		},
 		{
+			// GC_HERDR_WORKSPACE lets a city-level agent (named sessions ignore
+			// tmux_alias) choose its herdr workspace, e.g. city machinery -> "g1".
+			name:     "town-level agent with workspace override",
+			sessName: "planner",
+			env:      map[string]string{"GC_ALIAS": "planner", "GC_HERDR_WORKSPACE": "g1"},
+			wantWS:   "g1",
+			wantTab:  "planner",
+		},
+		{
+			name:     "pack singleton with workspace override",
+			sessName: "gastown__deacon",
+			env:      map[string]string{"GC_HERDR_WORKSPACE": " g1 "},
+			wantWS:   "g1",
+			wantTab:  "deacon",
+		},
+		{
+			name:     "city pool wisp with workspace override moves workspace only",
+			sessName: "ops-luna-g1-wisp-jcpy19",
+			env:      map[string]string{"GC_HERDR_WORKSPACE": "g1"},
+			wantWS:   "g1",
+			wantTab:  "ops-luna-g1-wisp-jcpy19",
+		},
+		{
+			// A city-wide [workspace.env] override must not pull rig agents out of
+			// their rig workspace.
+			name:     "GC_RIG beats workspace override",
+			sessName: "webapp--gastown__witness",
+			env:      map[string]string{"GC_RIG": "webapp", "GC_HERDR_WORKSPACE": "g1"},
+			wantWS:   "webapp",
+			wantTab:  "witness",
+		},
+		{
+			name:     "blank workspace override is ignored",
+			sessName: "gastown__mayor",
+			env:      map[string]string{"GC_HERDR_WORKSPACE": "   "},
+			wantWS:   "gastown",
+			wantTab:  "mayor",
+		},
+		{
 			name:     "no env falls back to structural name parsing",
 			sessName: "webapp--gastown__refinery",
 			env:      nil,
