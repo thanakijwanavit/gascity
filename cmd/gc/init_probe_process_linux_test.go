@@ -81,13 +81,13 @@ func TestInitProbeHardExitHarness(t *testing.T) {
 // Pdeathsig without dropping attributes a caller (or a test override of
 // initRunVersionCommandContext) already set.
 func TestSetInitProbeParentDeathSignalKeepsExistingAttrs(t *testing.T) {
-	cmd := exec.Command("true")
+	cmd := &exec.Cmd{}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	setInitProbeParentDeathSignal(cmd)
 	if !cmd.SysProcAttr.Setpgid || cmd.SysProcAttr.Pdeathsig != syscall.SIGKILL {
 		t.Fatalf("SysProcAttr = %+v, want Setpgid kept and Pdeathsig SIGKILL", cmd.SysProcAttr)
 	}
-	bare := exec.Command("true")
+	bare := &exec.Cmd{}
 	setInitProbeParentDeathSignal(bare)
 	if bare.SysProcAttr == nil || bare.SysProcAttr.Pdeathsig != syscall.SIGKILL {
 		t.Fatalf("bare SysProcAttr = %+v, want Pdeathsig SIGKILL", bare.SysProcAttr)
